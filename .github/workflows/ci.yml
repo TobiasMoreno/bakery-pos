@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test -- --run
+      - run: npm run build
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_DB: bakery_pos_test
+          POSTGRES_USER: bakery
+          POSTGRES_PASSWORD: bakery_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bakery -d bakery_pos_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache: false
+      - name: Install Goose
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
+      - name: Migrate empty database
+        working-directory: backend
+        env:
+          GOOSE_DRIVER: postgres
+          GOOSE_DBSTRING: postgres://bakery:bakery_test_only@localhost:5432/bakery_pos_test?sslmode=disable
+          GOOSE_MIGRATION_DIR: migrations
+        run: goose up
+      - name: Test PostgreSQL repositories
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://bakery:bakery_test_only@localhost:5432/bakery_pos_test?sslmode=disable
+        run: go test -tags=integration ./internal/catalog
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet

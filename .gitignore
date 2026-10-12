@@ -1,0 +1,23 @@
+.env
+.env.local
+*.log
+
+# Go
+backend/bin/
+backend/coverage.out
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local recovery exports and test artifacts
+tmp/
+test-results/
+playwright-report/

@@ -1,0 +1,518 @@
+openapi: 3.1.0
+info:
+  title: Bakery POS API
+  version: 0.2.0
+  description: Contrato de fundaciones, catálogo y precios del MVP.
+servers:
+  - url: /api/v1
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Sesión iniciada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /auth/logout:
+    post:
+      operationId: logout
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Sesión cerrada.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /me:
+    get:
+      operationId: getCurrentUser
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Usuario autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /categories:
+    get:
+      operationId: listCategories
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Categorías ordenadas por estado y nombre.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createCategory
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        "201":
+          description: Categoría creada.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /products:
+    get:
+      operationId: listProducts
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: active, in: query, schema: { type: boolean } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Página de productos.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createProduct
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductInput" }
+      responses:
+        "201":
+          description: Producto creado con saldo inicial cero y precio versionado cuando corresponde.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProductID"
+    get:
+      operationId: getProduct
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Producto encontrado.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateProduct
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductPatch"
+      responses:
+        "200":
+          description: Producto actualizado sin reescribir precios anteriores.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /products/{id}/prices:
+    parameters:
+      - $ref: "#/components/parameters/ProductID"
+    get:
+      operationId: getProductPriceHistory
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Historial de precios, más reciente primero.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Price" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /products/import/preview:
+    post:
+      operationId: previewProductImport
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImportPreviewRequest" }
+      responses:
+        "200":
+          description: Filas normalizadas, errores y hash vinculante.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportPreview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /products/import/commit:
+    post:
+      operationId: commitProductImport
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ImportPreviewRequest"
+                - type: object
+                  required: [preview_hash]
+                  properties:
+                    preview_hash: { type: string, minLength: 64, maxLength: 64 }
+      responses:
+        "201":
+          description: Importación atómica confirmada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported_count, catalog_version]
+                properties:
+                  imported_count: { type: integer }
+                  catalog_version: { type: integer, format: int64 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /prices/bulk-preview:
+    post:
+      operationId: previewBulkPrices
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkPriceRequest" }
+      responses:
+        "200":
+          description: Precios anteriores y nuevos sin mutar el catálogo.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkPricePreview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /prices/bulk-commit:
+    post:
+      operationId: commitBulkPrices
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/BulkPriceRequest"
+                - type: object
+                  required: [preview_hash]
+                  properties:
+                    preview_hash: { type: string, minLength: 64, maxLength: 64 }
+      responses:
+        "200":
+          description: Aumento aplicado atómicamente.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkPricePreview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /pos/catalog-snapshot:
+    get:
+      operationId: getCatalogSnapshot
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Productos activos y vendibles para el POS, con versión.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CatalogSnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: bakery_pos_session
+  parameters:
+    ProductID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 80
+        password:
+          type: string
+          minLength: 8
+          maxLength: 256
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, name, username, role, permissions]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        username:
+          type: string
+        role:
+          type: string
+          enum: [seller, owner]
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+    Category:
+      type: object
+      required: [id, name, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProductInput:
+      type: object
+      additionalProperties: false
+      required: [category_id, name, product_type, sale_mode, base_unit, sellable, track_lots, barcode]
+      properties:
+        category_id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        product_type: { type: string, enum: [ingredient, produced, resale] }
+        sale_mode: { type: string, enum: [unit, weight] }
+        base_unit: { type: string, enum: [unit, g, ml] }
+        sellable: { type: boolean }
+        track_lots: { type: boolean }
+        barcode: { type: string, maxLength: 64 }
+        price_cents: { type: integer, format: int64, minimum: 1 }
+    Product:
+      allOf:
+        - $ref: "#/components/schemas/ProductInput"
+        - type: object
+          required: [id, category_name, active, current_price_cents, price_unit, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            category_name: { type: string }
+            active: { type: boolean }
+            current_price_cents:
+              type: [integer, "null"]
+              format: int64
+            price_unit:
+              type: [string, "null"]
+              enum: [unit, kg, null]
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    ProductPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        category_id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        product_type: { type: string, enum: [ingredient, produced, resale] }
+        sale_mode: { type: string, enum: [unit, weight] }
+        base_unit: { type: string, enum: [unit, g, ml] }
+        sellable: { type: boolean }
+        track_lots: { type: boolean }
+        active: { type: boolean }
+        barcode: { type: string, maxLength: 64 }
+        price_cents: { type: integer, format: int64, minimum: 1 }
+    ProductList:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Product" }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    Price:
+      type: object
+      required: [id, product_id, amount_cents, price_unit, effective_from, actor_id]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        amount_cents: { type: integer, format: int64 }
+        price_unit: { type: string, enum: [unit, kg] }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: [string, "null"], format: date-time }
+        actor_id: { type: string, format: uuid }
+    BulkPriceRequest:
+      type: object
+      additionalProperties: false
+      required: [percentage, product_ids]
+      properties:
+        percentage:
+          type: string
+          pattern: "^[0-9]+(?:\\.[0-9]{1,2})?$"
+          description: Porcentaje decimal positivo, máximo 1000.
+        product_ids:
+          type: array
+          uniqueItems: true
+          items: { type: string, format: uuid }
+          description: Vacío aplica a todos los productos activos con precio.
+    BulkPriceItem:
+      type: object
+      required: [product_id, product_name, old_price_cents, new_price_cents, price_unit]
+      properties:
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        old_price_cents: { type: integer, format: int64 }
+        new_price_cents: { type: integer, format: int64 }
+        price_unit: { type: string, enum: [unit, kg] }
+    BulkPricePreview:
+      type: object
+      required: [percentage, preview_hash, items]
+      properties:
+        percentage: { type: string }
+        preview_hash: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/BulkPriceItem" }
+    ImportPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [csv]
+      properties:
+        csv: { type: string, maxLength: 1900000 }
+    ImportRow:
+      type: object
+      required: [row_number, name, category, errors]
+      properties:
+        row_number: { type: integer }
+        name: { type: string }
+        category: { type: string }
+        barcode: { type: string }
+        errors:
+          type: array
+          items: { type: string }
+    ImportPreview:
+      type: object
+      required: [preview_hash, valid_count, error_count, rows]
+      properties:
+        preview_hash: { type: string }
+        valid_count: { type: integer }
+        error_count: { type: integer }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/ImportRow" }
+    CatalogSnapshot:
+      type: object
+      required: [version, generated_at, products]
+      properties:
+        version: { type: integer, format: int64 }
+        generated_at: { type: string, format: date-time }
+        products:
+          type: array
+          items: { $ref: "#/components/schemas/Product" }
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        request_id:
+          type: string
+  responses:
+    BadRequest:
+      description: Solicitud inválida.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Credenciales o sesión inválidas.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: La sesión no tiene la capacidad requerida.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Recurso inexistente.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Valor duplicado o previsualización desactualizada.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Datos de catálogo inválidos.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Demasiados intentos.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
