@@ -15,6 +15,8 @@ import (
 	"bakery-pos/backend/internal/config"
 	"bakery-pos/backend/internal/database"
 	"bakery-pos/backend/internal/httpapi"
+	"bakery-pos/backend/internal/inventory"
+	"bakery-pos/backend/internal/pos"
 )
 
 func main() {
@@ -40,11 +42,17 @@ func main() {
 	authService := auth.NewService(authRepository, cfg.SessionTTL)
 	catalogRepository := catalog.NewPostgresRepository(pool)
 	catalogService := catalog.NewService(catalogRepository)
+	inventoryRepository := inventory.NewPostgresRepository(pool)
+	inventoryService := inventory.NewService(inventoryRepository)
+	posRepository := pos.NewPostgresRepository(pool)
+	posService := pos.NewService(posRepository)
 	handler := httpapi.NewServer(authService, pool, httpapi.Options{
 		AllowedOrigin: cfg.AllowedOrigin,
 		CookieSecure:  cfg.CookieSecure,
 		Logger:        logger,
 		Catalog:       catalogService,
+		Inventory:     inventoryService,
+		POS:           posService,
 	}).Routes()
 
 	server := &http.Server{

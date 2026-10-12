@@ -25,11 +25,12 @@ import { centsToInput, formatARS, parseARSCents } from './money'
 interface CatalogDashboardProps {
   user: User
   onLogout: () => Promise<void>
+  onOpenPOS?: () => void
 }
 
 type Panel = 'product' | 'bulk' | 'import' | null
 
-function CatalogDashboard({ user, onLogout }: CatalogDashboardProps) {
+function CatalogDashboard({ user, onLogout, onOpenPOS }: CatalogDashboardProps) {
   const [categories, setCategories] = useState<Category[]>([])
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(true)
@@ -92,6 +93,7 @@ function CatalogDashboard({ user, onLogout }: CatalogDashboardProps) {
           <span className="section-marker">Catálogo</span>
         </div>
         <div className="user-actions">
+          {onOpenPOS && <button className="quiet-button compact-button" type="button" onClick={onOpenPOS}>Ir a ventas</button>}
           <span className="role-chip">{user.role === 'owner' ? 'Dueño' : 'Empleado'}</span>
           <button
             className="text-button"

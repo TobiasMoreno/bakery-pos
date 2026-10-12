@@ -5,9 +5,10 @@ Go, React, TypeScript y PostgreSQL.
 
 ## Estado
 
-Fase 1 implementada: fundaciones locales, autenticación y shell web. Las
-funcionalidades de catálogo, ventas, caja e inventario se incorporan por fases y
-todavía no están disponibles.
+Fase 3 implementada: fundaciones locales, autenticación, catálogo, precios,
+libro mínimo de inventario, POS por unidad/peso, pagos combinados, turno de caja,
+historial e incidencias por stock negativo. El protocolo offline y los flujos
+completos de inventario se incorporan en las próximas fases.
 
 ## Requisitos
 
@@ -36,6 +37,8 @@ Las credenciales se pueden reemplazar mediante las variables `DEMO_*` de
 - `make migrate`: aplica migraciones pendientes.
 - `make seed`: crea o actualiza los dos usuarios demo.
 - `make test`: ejecuta pruebas de backend y frontend.
+- `make test-integration`: migra PostgreSQL de pruebas y ejecuta en serie las
+  pruebas de repositorios y constraints reales.
 - `make test-db`: inicia PostgreSQL de pruebas, aislado en el puerto 5433 y sin
   volumen persistente.
 - `make lint`: ejecuta validaciones estáticas.
@@ -45,6 +48,9 @@ Las credenciales se pueden reemplazar mediante las variables `DEMO_*` de
 
 - [Especificación del MVP](./docs/ESPECIFICACION_TECNICA_PANADERIA_POS_MVP.md)
 - [Cierre de fase 0](./docs/FASE_0_CIERRE_DE_DECISIONES.md)
+- [Evidencia de fase 1](./docs/FASE_1_FUNDACIONES.md)
+- [Evidencia de fase 2](./docs/FASE_2_CATALOGO_E_INVENTARIO.md)
+- [Evidencia de fase 3](./docs/FASE_3_POS_CAJA_ONLINE.md)
 - [ADRs](./docs/adr/README.md)
 - [Plan de implementación](./docs/PLAN_IMPLEMENTACION_MVP.md)
 

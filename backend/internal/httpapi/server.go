@@ -14,6 +14,8 @@ import (
 
 	"bakery-pos/backend/internal/auth"
 	"bakery-pos/backend/internal/catalog"
+	"bakery-pos/backend/internal/inventory"
+	"bakery-pos/backend/internal/pos"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -37,6 +39,8 @@ type Options struct {
 	CookieSecure  bool
 	Logger        *slog.Logger
 	Catalog       *catalog.Service
+	Inventory     *inventory.Service
+	POS           *pos.Service
 }
 
 type Server struct {
@@ -45,6 +49,8 @@ type Server struct {
 	options      Options
 	loginLimiter *LoginLimiter
 	catalog      *catalog.Service
+	inventory    *inventory.Service
+	pos          *pos.Service
 	now          func() time.Time
 }
 
@@ -58,6 +64,8 @@ func NewServer(authService *auth.Service, pinger Pinger, options Options) *Serve
 		options:      options,
 		loginLimiter: NewLoginLimiter(5, 15*time.Minute),
 		catalog:      options.Catalog,
+		inventory:    options.Inventory,
+		pos:          options.POS,
 		now:          time.Now,
 	}
 }
@@ -93,6 +101,21 @@ func (s *Server) Routes() http.Handler {
 				protected.With(RequirePermission(auth.PermissionPricingWrite)).Post("/prices/bulk-preview", s.previewBulkPrices)
 				protected.With(RequirePermission(auth.PermissionPricingWrite)).Post("/prices/bulk-commit", s.commitBulkPrices)
 				protected.With(RequirePermission(auth.PermissionCatalogRead)).Get("/pos/catalog-snapshot", s.catalogSnapshot)
+			}
+			if s.inventory != nil {
+				protected.With(RequirePermission(auth.PermissionInventoryRead)).Get("/inventory/balances", s.listInventoryBalances)
+				protected.With(RequirePermission(auth.PermissionInventoryRead)).Get("/inventory/movements", s.listInventoryMovements)
+			}
+			if s.pos != nil {
+				protected.With(RequirePermission(auth.PermissionSalesWrite)).Post("/pos/device/acquire", s.acquirePOSDevice)
+				protected.With(RequirePermission(auth.PermissionSalesWrite)).Post("/pos/device/release", s.releasePOSDevice)
+				protected.With(RequirePermission(auth.PermissionCashOperate)).Post("/cash/shifts", s.openCashShift)
+				protected.With(RequirePermission(auth.PermissionCashOperate)).Get("/cash/shifts/current", s.currentCashShift)
+				protected.With(RequirePermission(auth.PermissionCashOperate)).Post("/cash/shifts/{id}/movements", s.recordCashMovement)
+				protected.With(RequirePermission(auth.PermissionCashOperate)).Post("/cash/shifts/{id}/close", s.closeCashShift)
+				protected.With(RequirePermission(auth.PermissionSalesWrite)).Post("/sales", s.createSale)
+				protected.With(RequirePermission(auth.PermissionSalesWrite)).Get("/sales", s.listSales)
+				protected.With(RequirePermission(auth.PermissionSalesWrite)).Get("/sales/{id}", s.getSale)
 			}
 		})
 	})

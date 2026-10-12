@@ -77,6 +77,135 @@ export interface ImportPreview {
   rows: ImportRow[]
 }
 
+export type InventoryMovementType =
+  | 'initial'
+  | 'purchase'
+  | 'production'
+  | 'sale'
+  | 'return'
+  | 'waste'
+  | 'adjustment'
+
+export interface InventoryBalance {
+  product_id: string
+  product_name: string
+  base_unit: BaseUnit
+  quantity: string
+  updated_at: string
+}
+
+export interface InventoryMovement {
+  id: string
+  product_id: string
+  product_name: string
+  base_unit: BaseUnit
+  quantity_delta: string
+  movement_type: InventoryMovementType
+  reference_type: string
+  reference_id: string | null
+  actor_id: string
+  request_id: string
+  reason?: string
+  occurred_at: string
+  created_at: string
+}
+
+export interface Page<T> {
+  items: T[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface CatalogSnapshot {
+  version: number
+  generated_at: string
+  products: Product[]
+}
+
+export interface DeviceSession {
+  id: string
+  device_id: string
+  device_name: string
+  user_id: string
+  status: 'active' | 'released' | 'recovery_required'
+  fencing_version: number
+  acquired_at: string
+}
+
+export interface CashShift {
+  id: string
+  status: 'open' | 'closed' | 'provisional_closed' | 'reconciliation_required'
+  version: number
+  device_session_id: string
+  opened_by: string
+  opening_cash_cents: number
+  opening_note?: string
+  opened_at: string
+  counted_cash_cents?: number
+  expected_cash_cents: number
+  difference_cents?: number
+  closing_note?: string
+  closed_at?: string
+}
+
+export type CashMovementType = 'income' | 'expense' | 'withdrawal'
+export type PaymentMethod = 'cash' | 'transfer' | 'qr' | 'card' | 'other'
+export type PaymentStatus = 'reported' | 'confirmed'
+
+export interface SaleInput {
+  operation_id: string
+  device_session_id: string
+  fencing_version: number
+  cash_shift_id: string
+  shift_version: number
+  catalog_version: number
+  items: Array<{ product_id: string; quantity: string }>
+  payments: Array<{
+    method: PaymentMethod
+    amount_cents: number
+    status: PaymentStatus
+    received_cents?: number
+    external_reference: string
+    verification_method: string
+  }>
+}
+
+export interface Sale {
+  id: string
+  cash_shift_id: string
+  payment_state: 'unverified' | 'settled' | 'issue'
+  status: string
+  total_cents: number
+  completed_at: string
+  cash_shift_version: number
+  replayed: boolean
+  items: Array<{
+    id: string
+    product_id: string
+    product_name: string
+    sale_mode: SaleMode
+    base_unit: BaseUnit
+    quantity: string
+    unit_price_cents: number
+    subtotal_cents: number
+  }>
+  payments: Array<{
+    id: string
+    method: PaymentMethod
+    amount_cents: number
+    status: PaymentStatus
+    received_cents?: number
+    change_cents?: number
+  }>
+  inventory_incidents: Array<{
+    id: string
+    product_id: string
+    balance_quantity: string
+    status: string
+  }>
+}
+
 interface APIErrorBody {
   code?: string
   message?: string
@@ -210,4 +339,84 @@ export async function commitProductImport(csv: string, previewHash: string): Pro
     method: 'POST',
     body: JSON.stringify({ csv, preview_hash: previewHash }),
   })
+}
+
+export async function listInventoryBalances(query = ''): Promise<Page<InventoryBalance>> {
+  const params = new URLSearchParams({ limit: '200' })
+  if (query.trim()) params.set('q', query.trim())
+  return request<Page<InventoryBalance>>(`/api/v1/inventory/balances?${params.toString()}`)
+}
+
+export async function listInventoryMovements(productID?: string): Promise<Page<InventoryMovement>> {
+  const params = new URLSearchParams({ limit: '200' })
+  if (productID) params.set('product_id', productID)
+  return request<Page<InventoryMovement>>(`/api/v1/inventory/movements?${params.toString()}`)
+}
+
+export async function getCatalogSnapshot(): Promise<CatalogSnapshot> {
+  return request<CatalogSnapshot>('/api/v1/pos/catalog-snapshot')
+}
+
+export async function acquirePOSDevice(deviceID: string, deviceName: string): Promise<DeviceSession> {
+  return request<DeviceSession>('/api/v1/pos/device/acquire', {
+    method: 'POST',
+    body: JSON.stringify({ device_id: deviceID, device_name: deviceName }),
+  })
+}
+
+export async function releasePOSDevice(session: DeviceSession): Promise<void> {
+  const response = await fetch('/api/v1/pos/device/release', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: session.id, fencing_version: session.fencing_version, pending_operations: 0 }),
+  })
+  if (!response.ok) throw await readError(response)
+}
+
+export async function getCurrentCashShift(): Promise<CashShift | null> {
+  const response = await request<{ shift: CashShift | null }>('/api/v1/cash/shifts/current')
+  return response.shift
+}
+
+export async function openCashShift(input: {
+  device_session_id: string
+  fencing_version: number
+  opening_cash_cents: number
+  opening_note: string
+}): Promise<CashShift> {
+  return request<CashShift>('/api/v1/cash/shifts', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function recordCashMovement(shiftID: string, input: {
+  id: string
+  expected_version: number
+  movement_type: CashMovementType
+  amount_cents: number
+  reason: string
+  recipient: string
+}): Promise<CashShift> {
+  return request<CashShift>(`/api/v1/cash/shifts/${shiftID}/movements`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function closeCashShift(shiftID: string, input: {
+  expected_version: number
+  counted_cash_cents: number
+  closing_note: string
+}): Promise<CashShift> {
+  return request<CashShift>(`/api/v1/cash/shifts/${shiftID}/close`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function createSale(input: SaleInput): Promise<Sale> {
+  return request<Sale>('/api/v1/sales', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function listSales(): Promise<Page<Sale>> {
+  return request<Page<Sale>>('/api/v1/sales?limit=30')
 }

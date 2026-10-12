@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { APIError, getCurrentUser, login, logout, type User } from './api'
 import CatalogDashboard from './CatalogDashboard'
+import POSDashboard from './POSDashboard'
 
 type SessionState =
   | { status: 'loading' }
@@ -10,6 +11,7 @@ type SessionState =
 function App() {
   const [session, setSession] = useState<SessionState>({ status: 'loading' })
   const [connectionError, setConnectionError] = useState(false)
+  const [workspace, setWorkspace] = useState<'pos' | 'catalog'>('pos')
 
   useEffect(() => {
     let active = true
@@ -40,15 +42,19 @@ function App() {
       />
     )
   }
-  return (
+  const handleLogout = async () => {
+    await logout()
+    setSession({ status: 'anonymous' })
+    setWorkspace('pos')
+  }
+  if (workspace === 'catalog') return (
     <CatalogDashboard
       user={session.user}
-      onLogout={async () => {
-        await logout()
-        setSession({ status: 'anonymous' })
-      }}
+      onLogout={handleLogout}
+      onOpenPOS={() => setWorkspace('pos')}
     />
   )
+  return <POSDashboard user={session.user} onLogout={handleLogout} onOpenCatalog={() => setWorkspace('catalog')} />
 }
 
 function LoadingScreen() {
@@ -93,16 +99,16 @@ function LoginScreen({ connectionError, onAuthenticated }: LoginScreenProps) {
           <span>Bakery POS</span>
         </div>
         <div className="story-copy">
-          <p className="eyebrow">Base operativa · fase 1</p>
-          <h1 id="welcome-title">Todo listo antes de abrir el horno.</h1>
+          <p className="eyebrow">Ventas y caja · fase 3</p>
+          <h1 id="welcome-title">El mostrador, listo para vender.</h1>
           <p>
-            Una caja clara, auditable y pensada para el ritmo real del mostrador.
-            Esta primera entrega protege el acceso y prepara el terreno.
+            Una caja táctil, auditable y pensada para el ritmo real del mostrador.
+            Cada venta une precio, pago, efectivo y stock en una sola operación.
           </p>
         </div>
         <div className="story-note">
           <span aria-hidden="true">01</span>
-          <p>Sesiones seguras, permisos en servidor y PostgreSQL como fuente de verdad.</p>
+          <p>Turnos reproducibles, pagos combinados y comprobantes internos sin efectos duplicados.</p>
         </div>
       </section>
 

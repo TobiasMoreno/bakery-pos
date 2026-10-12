@@ -20,3 +20,15 @@ export function formatARS(cents: number): string {
   const decimals = (value % 100n).toString().padStart(2, '0')
   return `$ ${whole},${decimals}`
 }
+
+export function calculateLineSubtotal(priceCents: number, saleMode: 'unit' | 'weight', quantity: string): number | undefined {
+  if (!/^\d+(?:\.\d{1,3})?$/.test(quantity.trim())) return undefined
+  const [whole = '0', fraction = ''] = quantity.trim().split('.')
+  const milliunits = BigInt(whole) * 1000n + BigInt(fraction.padEnd(3, '0'))
+  if (milliunits <= 0n) return undefined
+  if (saleMode === 'unit' && milliunits % 1000n !== 0n) return undefined
+  const denominator = saleMode === 'unit' ? 1000n : 1_000_000n
+  const subtotal = (BigInt(priceCents) * milliunits + denominator / 2n) / denominator
+  if (subtotal <= 0n || subtotal > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
+  return Number(subtotal)
+}

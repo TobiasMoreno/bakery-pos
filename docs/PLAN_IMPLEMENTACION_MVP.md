@@ -1,8 +1,8 @@
 # Plan de implementación del MVP
 
-- Versión: 2.0, actualizado al cierre de fase 0
-- Fecha: 2026-10-11
-- Estado: Fase 1 completada; listo para iniciar fase 2
+- Versión: 2.1
+- Fecha: 2026-10-12
+- Estado: Fase 3 completada; listo para iniciar fase 4
 
 ## Principios de ejecución
 
@@ -83,6 +83,9 @@ encuentra en `FASE_1_FUNDACIONES.md`.
 6. El saldo se puede reconstruir desde movimientos.
 7. Cantidades unitarias no aceptan fracciones.
 
+Estado: completada y verificada localmente el 2026-10-12. La evidencia se
+encuentra en `FASE_2_CATALOGO_E_INVENTARIO.md`.
+
 ## Fase 3 — POS, pagos y caja online
 
 ### Alcance
@@ -107,6 +110,9 @@ encuentra en `FASE_1_FUNDACIONES.md`.
 6. Venta sobre stock disponible se permite y abre incidencia.
 7. Sólo la sesión POS activa registra ventas; dispositivos administrativos
    continúan funcionando.
+
+Estado: completada y verificada localmente el 2026-10-12. La evidencia se
+encuentra en `FASE_3_POS_CAJA_ONLINE.md`.
 
 ## Fase 4 — Offline, dispositivos y recuperación
 

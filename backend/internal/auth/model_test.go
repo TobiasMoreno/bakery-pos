@@ -23,3 +23,13 @@ func TestOwnerHasAdministrativePermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestSellerReadsInventoryWithoutManualAdjustmentPermission(t *testing.T) {
+	user := User{Role: RoleSeller}
+	if !user.Has(PermissionInventoryRead) {
+		t.Fatal("seller should read inventory")
+	}
+	if user.Has(PermissionInventoryAdjust) {
+		t.Fatal("seller without optional capability should not adjust inventory")
+	}
+}

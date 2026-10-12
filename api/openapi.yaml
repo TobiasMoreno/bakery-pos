@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Bakery POS API
-  version: 0.2.0
-  description: Contrato de fundaciones, catálogo y precios del MVP.
+  version: 0.4.0
+  description: Contrato de fundaciones, catálogo, inventario, ventas y caja online del MVP.
 servers:
   - url: /api/v1
 paths:
@@ -273,6 +273,209 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CatalogSnapshot" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /pos/device/acquire:
+    post:
+      summary: Adquirir el puesto de venta
+      operationId: acquirePOSDevice
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcquireDeviceRequest" }
+      responses:
+        "200":
+          description: Sesión POS activa, nueva o idempotentemente recuperada para el mismo dispositivo.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceSession" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /pos/device/release:
+    post:
+      summary: Liberar el puesto de venta
+      operationId: releasePOSDevice
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseDeviceRequest" }
+      responses:
+        "204": { description: Sesión POS liberada. }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /cash/shifts:
+    post:
+      summary: Abrir un turno de caja
+      operationId: openCashShift
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenCashShiftRequest" }
+      responses:
+        "201":
+          description: Turno abierto con efectivo inicial confirmado.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CashShift" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /cash/shifts/current:
+    get:
+      summary: Consultar el turno de caja abierto
+      operationId: getCurrentCashShift
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Turno vigente o null si la caja está cerrada.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [shift]
+                properties:
+                  shift: { oneOf: [{ $ref: "#/components/schemas/CashShift" }, { type: "null" }] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cash/shifts/{id}/movements:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Registrar un movimiento manual de caja
+      operationId: recordCashMovement
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecordCashMovementRequest" }
+      responses:
+        "201":
+          description: Movimiento inmutable registrado y turno actualizado.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CashShift" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /cash/shifts/{id}/close:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Cerrar y arquear un turno online
+      operationId: closeCashShift
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CloseCashShiftRequest" }
+      responses:
+        "200":
+          description: Cierre definitivo con esperado, contado y diferencia.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CashShift" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /sales:
+    get:
+      summary: Listar ventas recientes
+      operationId: listSales
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Ventas con ítems, pagos e incidencias.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SaleList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    post:
+      summary: Confirmar una venta online
+      operationId: createSale
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSaleRequest" }
+      responses:
+        "201":
+          description: Venta, pagos, caja, inventario, incidencias y auditoría confirmados atómicamente.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sale" }
+        "200":
+          description: Reintento idempotente; devuelve la venta ya confirmada.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sale" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /sales/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Obtener una venta y su comprobante interno
+      operationId: getSale
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Venta encontrada.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sale" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /inventory/balances:
+    get:
+      summary: Listar saldos de inventario
+      operationId: listInventoryBalances
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: q
+          in: query
+          description: Búsqueda parcial por nombre de producto.
+          schema: { type: string }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Saldos proyectados desde el libro de movimientos.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryBalanceList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /inventory/movements:
+    get:
+      summary: Listar movimientos de inventario
+      operationId: listInventoryMovements
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: product_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: movement_type
+          in: query
+          schema: { $ref: "#/components/schemas/InventoryMovementType" }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Libro inmutable de movimientos, más reciente primero.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryMovementList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 components:
   securitySchemes:
     sessionCookie:
@@ -463,6 +666,263 @@ components:
         products:
           type: array
           items: { $ref: "#/components/schemas/Product" }
+    AcquireDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [device_id, device_name]
+      properties:
+        device_id: { type: string, format: uuid }
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+    ReleaseDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [session_id, fencing_version, pending_operations]
+      properties:
+        session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        pending_operations: { type: integer, minimum: 0, maximum: 0 }
+    DeviceSession:
+      type: object
+      additionalProperties: false
+      required: [id, device_id, device_name, user_id, status, fencing_version, acquired_at]
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        device_name: { type: string }
+        user_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, released, recovery_required] }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        acquired_at: { type: string, format: date-time }
+        released_at: { type: string, format: date-time }
+    OpenCashShiftRequest:
+      type: object
+      additionalProperties: false
+      required: [device_session_id, fencing_version, opening_cash_cents, opening_note]
+      properties:
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        opening_cash_cents: { type: integer, format: int64, minimum: 0 }
+        opening_note: { type: string, maxLength: 300 }
+    RecordCashMovementRequest:
+      type: object
+      additionalProperties: false
+      required: [id, expected_version, movement_type, amount_cents, reason, recipient]
+      properties:
+        id: { type: string, format: uuid }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        movement_type: { type: string, enum: [income, expense, withdrawal] }
+        amount_cents: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 3, maxLength: 300 }
+        recipient: { type: string, maxLength: 120 }
+    CloseCashShiftRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version, counted_cash_cents, closing_note]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        counted_cash_cents: { type: integer, format: int64, minimum: 0 }
+        closing_note: { type: string, maxLength: 300 }
+    CashShift:
+      type: object
+      additionalProperties: false
+      required: [id, status, version, device_session_id, opened_by, opening_cash_cents, opened_at, expected_cash_cents]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [open, closed, provisional_closed, reconciliation_required] }
+        version: { type: integer, format: int64, minimum: 1 }
+        device_session_id: { type: string, format: uuid }
+        opened_by: { type: string, format: uuid }
+        opening_cash_cents: { type: integer, format: int64, minimum: 0 }
+        opening_note: { type: string }
+        opened_at: { type: string, format: date-time }
+        closed_by: { type: string, format: uuid }
+        counted_cash_cents: { type: integer, format: int64, minimum: 0 }
+        expected_cash_cents: { type: integer, format: int64 }
+        difference_cents: { type: integer, format: int64 }
+        closing_note: { type: string }
+        closed_at: { type: string, format: date-time }
+    SaleItemRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, quantity]
+      properties:
+        product_id: { type: string, format: uuid }
+        quantity: { $ref: "#/components/schemas/InventoryQuantity" }
+    SalePaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [method, amount_cents, status, external_reference, verification_method]
+      properties:
+        method: { type: string, enum: [cash, transfer, qr, card, other] }
+        amount_cents: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [reported, confirmed] }
+        received_cents: { type: integer, format: int64, minimum: 1 }
+        external_reference: { type: string, maxLength: 160 }
+        verification_method: { type: string, maxLength: 120 }
+    CreateSaleRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, device_session_id, fencing_version, cash_shift_id, shift_version, catalog_version, items, payments]
+      properties:
+        operation_id: { type: string, format: uuid }
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        cash_shift_id: { type: string, format: uuid }
+        shift_version: { type: integer, format: int64, minimum: 1 }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/SaleItemRequest" }
+        payments:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: "#/components/schemas/SalePaymentRequest" }
+    SaleItem:
+      type: object
+      required: [id, line_number, product_id, product_name, sale_mode, base_unit, quantity, unit_price_cents, price_unit, subtotal_cents, catalog_version]
+      properties:
+        id: { type: string, format: uuid }
+        line_number: { type: integer, minimum: 1 }
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        sale_mode: { type: string, enum: [unit, weight] }
+        base_unit: { type: string, enum: [unit, g] }
+        quantity: { $ref: "#/components/schemas/InventoryQuantity" }
+        unit_price_cents: { type: integer, format: int64, minimum: 1 }
+        price_unit: { type: string, enum: [unit, kg] }
+        subtotal_cents: { type: integer, format: int64, minimum: 1 }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+    SalePayment:
+      type: object
+      required: [id, method, amount_cents, status]
+      properties:
+        id: { type: string, format: uuid }
+        method: { type: string, enum: [cash, transfer, qr, card, other] }
+        amount_cents: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [pending, reported, confirmed, rejected] }
+        received_cents: { type: integer, format: int64 }
+        change_cents: { type: integer, format: int64 }
+        external_reference: { type: string }
+        confirmed_by: { type: string, format: uuid }
+        confirmed_at: { type: string, format: date-time }
+        verification_method: { type: string }
+    InventoryIncident:
+      type: object
+      required: [id, product_id, balance_quantity, status]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        balance_quantity: { $ref: "#/components/schemas/InventoryQuantity" }
+        status: { type: string, enum: [open, resolved] }
+    Sale:
+      type: object
+      required: [id, cash_shift_id, device_session_id, fencing_version, actor_id, status, payment_state, catalog_version, subtotal_cents, total_cents, completed_at, cash_shift_version, items, payments, inventory_incidents, replayed]
+      properties:
+        id: { type: string, format: uuid }
+        cash_shift_id: { type: string, format: uuid }
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64 }
+        actor_id: { type: string, format: uuid }
+        status: { type: string, enum: [completed, partially_returned, returned, voided] }
+        payment_state: { type: string, enum: [unverified, settled, issue] }
+        catalog_version: { type: integer, format: int64 }
+        subtotal_cents: { type: integer, format: int64 }
+        total_cents: { type: integer, format: int64 }
+        completed_at: { type: string, format: date-time }
+        cash_shift_version: { type: integer, format: int64 }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SaleItem" }
+        payments:
+          type: array
+          items: { $ref: "#/components/schemas/SalePayment" }
+        inventory_incidents:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryIncident" }
+        replayed: { type: boolean }
+    SaleList:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Sale" }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        offset: { type: integer, minimum: 0 }
+    InventoryQuantity:
+      type: string
+      pattern: "^-?(?:0|[0-9]{1,15})(?:\\.[0-9]{1,3})?$"
+      description: Cantidad decimal exacta en unidad base, con hasta tres decimales.
+      examples: ["3", "350.125", "-0.5"]
+    InventoryMovementType:
+      type: string
+      enum: [initial, purchase, production, sale, return, waste, adjustment]
+    InventoryBalance:
+      type: object
+      additionalProperties: false
+      required: [product_id, product_name, base_unit, quantity, updated_at]
+      properties:
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        base_unit: { type: string, enum: [unit, g, ml] }
+        quantity: { $ref: "#/components/schemas/InventoryQuantity" }
+        updated_at: { type: string, format: date-time }
+    InventoryBalanceList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryBalance" }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        offset: { type: integer, minimum: 0 }
+    InventoryMovement:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - product_id
+        - product_name
+        - base_unit
+        - quantity_delta
+        - movement_type
+        - reference_type
+        - reference_id
+        - actor_id
+        - request_id
+        - occurred_at
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        base_unit: { type: string, enum: [unit, g, ml] }
+        quantity_delta: { $ref: "#/components/schemas/InventoryQuantity" }
+        movement_type: { $ref: "#/components/schemas/InventoryMovementType" }
+        reference_type: { type: string }
+        reference_id: { type: [string, "null"], format: uuid }
+        actor_id: { type: string, format: uuid }
+        request_id: { type: string }
+        reason: { type: string }
+        occurred_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    InventoryMovementList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryMovement" }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        offset: { type: integer, minimum: 0 }
     Error:
       type: object
       additionalProperties: false
@@ -506,7 +966,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     ValidationError:
-      description: Datos de catálogo inválidos.
+      description: Datos o filtros de la operación inválidos.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
