@@ -1,0 +1,19 @@
+{
+  "name": "Bakery POS",
+  "short_name": "Bakery POS",
+  "description": "Punto de venta resiliente para el mostrador de la panadería.",
+  "lang": "es-AR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fffaf0",
+  "theme_color": "#b83b2f",
+  "icons": [
+    {
+      "src": "/icons/bakery-pos.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

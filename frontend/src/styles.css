@@ -1010,6 +1010,40 @@ button:disabled {
   background: rgba(82, 96, 68, 0.12);
 }
 
+.sync-chip {
+  min-height: 2.25rem;
+  border: 1px solid rgba(82, 96, 68, 0.25);
+  border-radius: 999px;
+  padding: 0.4rem 0.72rem;
+  color: var(--moss);
+  background: rgba(82, 96, 68, 0.1);
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-chip::before {
+  display: inline-block;
+  width: 0.48rem;
+  height: 0.48rem;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+.sync-chip.offline,
+.sync-chip.conflict,
+.sync-chip.recovery {
+  border-color: rgba(184, 59, 47, 0.28);
+  color: var(--tomato-dark);
+  background: rgba(184, 59, 47, 0.1);
+}
+
+.sync-chip.syncing::before {
+  animation: status-pulse 0.9s ease-in-out infinite alternate;
+}
+
 .compact-button {
   min-height: 2.35rem;
   padding: 0.4rem 0.75rem;
@@ -1369,7 +1403,8 @@ button:disabled {
 .payment-row input,
 .payment-row select,
 .cash-card input,
-.cash-card select {
+.cash-card select,
+.cash-card textarea {
   width: 100%;
   min-height: 3rem;
   border: 1px solid var(--line);
@@ -1420,7 +1455,8 @@ button:disabled {
 }
 
 .cash-workspace,
-.history-workspace {
+.history-workspace,
+.recovery-workspace {
   width: min(100% - 2rem, 88rem);
   margin: 0 auto;
   padding: clamp(2rem, 6vw, 5rem) 0;
@@ -1492,6 +1528,48 @@ button:disabled {
 .danger-button {
   color: var(--tomato-dark);
   border-color: var(--tomato);
+}
+
+.recovery-force {
+  width: min(100%, 44rem);
+}
+
+.recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.recovery-controls .verify-check {
+  grid-column: auto;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.recovery-controls .verify-check input {
+  width: 1.2rem;
+  min-height: 1.2rem;
+}
+
+.recovery-differences {
+  margin-top: 2rem;
+  border-top: 2px solid var(--ink);
+  padding-top: 1rem;
+}
+
+.recovery-differences article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 1rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.recovery-differences article p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
 }
 
 .history-grid {
@@ -1637,6 +1715,12 @@ button:disabled {
     display: none;
   }
 
+  .sync-chip {
+    max-width: 9.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .pos-heading {
     align-items: start;
     flex-direction: column;
@@ -1644,6 +1728,7 @@ button:disabled {
 
   .product-grid,
   .cash-grid,
+  .recovery-grid,
   .history-grid {
     grid-template-columns: 1fr;
   }

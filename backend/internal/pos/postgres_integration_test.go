@@ -4,7 +4,9 @@ package pos
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"testing"
 	"time"
@@ -15,8 +17,13 @@ import (
 	"github.com/google/uuid"
 )
 
+var testDatabaseURL = flag.String("test-database-url", "", "PostgreSQL URL used by integration tests; TEST_DATABASE_URL remains supported")
+
 func TestSaleCommitsCashInventoryIncidentAuditAndIdempotency(t *testing.T) {
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	databaseURL := *testDatabaseURL
+	if databaseURL == "" {
+		databaseURL = os.Getenv("TEST_DATABASE_URL")
+	}
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
@@ -132,12 +139,47 @@ func TestSaleCommitsCashInventoryIncidentAuditAndIdempotency(t *testing.T) {
 	if mixedSale.PaymentState != "unverified" || mixedSale.Payments[0].ChangeCents == nil || *mixedSale.Payments[0].ChangeCents != 10000 {
 		t.Fatalf("unexpected mixed payment result: %#v", mixedSale)
 	}
+	grant, err := service.IssueOfflineAuthorization(ctx, OfflineAuthorizationRequest{
+		DeviceSessionID: device.ID, FencingVersion: device.FencingVersion, CashShiftID: shift.ID,
+		ShiftVersion: mixedSale.CashShiftVersion, CatalogVersion: catalogVersion,
+	}, actorID)
+	if err != nil {
+		t.Fatalf("issue offline authorization: %v", err)
+	}
+	offlineReceived := int64(95000)
+	offlinePayload := CreateSaleInput{
+		OperationID: uuid.New(), DeviceSessionID: device.ID, FencingVersion: device.FencingVersion,
+		CashShiftID: shift.ID, ShiftVersion: mixedSale.CashShiftVersion, CatalogVersion: catalogVersion,
+		Items:    []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
+		Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 95000, Status: PaymentConfirmed, ReceivedCents: &offlineReceived}},
+	}
+	offlineHash, err := canonicalPayloadHash(offlinePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlinePayloadJSON, err := json.Marshal(offlinePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineOperation := OfflineOperation{
+		OperationID: offlinePayload.OperationID, OperationType: "sale", DeviceID: device.DeviceID, DeviceSessionID: device.ID,
+		FencingVersion: device.FencingVersion, Sequence: 1, CreatedAtLocal: grant.IssuedAt.Add(time.Second),
+		Timezone: "America/Argentina/Buenos_Aires", PayloadHash: offlineHash, Authorization: grant.Token, Payload: offlinePayloadJSON,
+	}
+	firstSync, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{offlineOperation}}, "request-sync")
+	if err != nil || len(firstSync.ACKs) != 1 || firstSync.ACKs[0].SaleID == nil {
+		t.Fatalf("first sync = %#v, error = %v", firstSync, err)
+	}
+	replayedSync, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{offlineOperation}}, "request-sync-retry")
+	if err != nil || len(replayedSync.ACKs) != 1 || !replayedSync.ACKs[0].Replayed || replayedSync.ACKs[0].SaleID == nil || *replayedSync.ACKs[0].SaleID != *firstSync.ACKs[0].SaleID {
+		t.Fatalf("replayed sync = %#v, error = %v", replayedSync, err)
+	}
 
 	current, err := service.CurrentShift(ctx)
 	if err != nil {
 		t.Fatalf("current shift: %v", err)
 	}
-	if current == nil || current.ExpectedCashCents != 3382500 || current.Version != 3 {
+	if current == nil || current.ExpectedCashCents != 3477500 || current.Version != 4 {
 		t.Fatalf("unexpected current shift: %#v", current)
 	}
 	currentValue := *current
@@ -155,22 +197,107 @@ func TestSaleCommitsCashInventoryIncidentAuditAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record withdrawal: %v", err)
 	}
-	if currentValue.ExpectedCashCents != 2782500 || currentValue.Version != 5 {
+	if currentValue.ExpectedCashCents != 2877500 || currentValue.Version != 6 {
 		t.Fatalf("cash formula result = %#v", currentValue)
 	}
-	closed, err := service.CloseShift(ctx, CloseShiftInput{
-		CashShiftID: shift.ID, ExpectedVersion: currentValue.Version, CountedCashCents: 2750000,
-	}, actorID, "request-close")
-	if err != nil {
-		t.Fatalf("close shift: %v", err)
+	closePayload := OfflineCloseShiftInput{CashShiftID: shift.ID, ExpectedVersion: currentValue.Version, CountedCashCents: 2850000}
+	closeJSON, _ := json.Marshal(closePayload)
+	closeHash, _ := canonicalRawPayloadHash(closeJSON)
+	closeOperation := OfflineOperation{
+		OperationID: uuid.New(), OperationType: "shift_close", DeviceID: device.DeviceID, DeviceSessionID: device.ID,
+		FencingVersion: device.FencingVersion, Sequence: 2, CreatedAtLocal: grant.IssuedAt.Add(2 * time.Second),
+		Timezone: "America/Argentina/Buenos_Aires", PreviousHash: offlineHash, PayloadHash: closeHash, Authorization: grant.Token, Payload: closeJSON,
 	}
-	if closed.ExpectedCashCents != 2782500 || closed.DifferenceCents == nil || *closed.DifferenceCents != -32500 {
-		t.Fatalf("unexpected closed shift: %#v", closed)
+	closeResult, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{closeOperation}}, "request-offline-close")
+	if err != nil || len(closeResult.ACKs) != 1 || closeResult.ACKs[0].ShiftID == nil {
+		t.Fatalf("offline close sync = %#v, error = %v", closeResult, err)
+	}
+	closed, err := service.CurrentShift(ctx)
+	if err != nil || closed != nil {
+		t.Fatalf("current shift after offline close = %#v, error = %v", closed, err)
+	}
+	closedShift, err := getShift(ctx, pool, shift.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedShift.ExpectedCashCents != 2877500 || closedShift.DifferenceCents == nil || *closedShift.DifferenceCents != -27500 {
+		t.Fatalf("unexpected closed shift: %#v", closedShift)
+	}
+	newShiftID := uuid.New()
+	openPayload := OfflineOpenShiftInput{ID: newShiftID, PreviousCashShiftID: shift.ID, DeviceSessionID: device.ID, FencingVersion: device.FencingVersion, OpeningCashCents: 2850000}
+	openJSON, _ := json.Marshal(openPayload)
+	openHash, _ := canonicalRawPayloadHash(openJSON)
+	openOperation := OfflineOperation{
+		OperationID: uuid.New(), OperationType: "shift_open", DeviceID: device.DeviceID, DeviceSessionID: device.ID,
+		FencingVersion: device.FencingVersion, Sequence: 3, CreatedAtLocal: grant.IssuedAt.Add(3 * time.Second),
+		Timezone: "America/Argentina/Buenos_Aires", PreviousHash: closeHash, PayloadHash: openHash, Authorization: grant.Token, Payload: openJSON,
+	}
+	openResult, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{openOperation}}, "request-offline-open")
+	if err != nil || len(openResult.ACKs) != 1 || openResult.ACKs[0].ShiftID == nil || *openResult.ACKs[0].ShiftID != newShiftID {
+		t.Fatalf("offline open sync = %#v, error = %v", openResult, err)
+	}
+	replayedClose, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{closeOperation}}, "request-offline-close-replay")
+	if err != nil || !replayedClose.ACKs[0].Replayed {
+		t.Fatalf("offline close replay = %#v, error = %v", replayedClose, err)
+	}
+	recovery, err := service.ForceRecovery(ctx, ForceRecoveryInput{
+		PreviousSessionID: device.ID, DeviceID: uuid.New(), DeviceName: "Mostrador reemplazo",
+		Reason: "Dispositivo anterior inutilizable", CashCountCents: 2850000,
+	}, actorID, "request-force-recovery")
+	if err != nil || recovery.AffectedShiftID == nil || recovery.AffectedShiftVersion != 2 {
+		t.Fatalf("force recovery = %#v, error = %v", recovery, err)
+	}
+	details, err := service.AddRecoveryDifference(ctx, recovery.ID, RecoveryDifferenceInput{
+		ID: uuid.New(), Kind: "sequence_gap", Description: "Se documentó el tramo posterior al último ACK.",
+	}, actorID, "request-recovery-difference")
+	if err != nil || len(details.Differences) != 1 {
+		t.Fatalf("recovery differences = %#v, error = %v", details, err)
+	}
+	sourceOperationID := uuid.New()
+	reconstructionID := uuid.New()
+	reconstructed, err := service.ReconstructRecoverySale(ctx, recovery.ID, RecoveryReconstructionInput{
+		ReconciliationOperationID: reconstructionID, SourceOperationID: &sourceOperationID, Certainty: "exact", Evidence: "Comprobante físico conservado",
+		Sale: CreateSaleInput{
+			DeviceSessionID: device.ID, FencingVersion: device.FencingVersion, CashShiftID: newShiftID,
+			ShiftVersion: recovery.AffectedShiftVersion, CatalogVersion: catalogVersion,
+			Items: []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
+			Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 95000, Status: PaymentConfirmed, ReceivedCents: int64Pointer(95000)}},
+		},
+	}, actorID, "request-reconstruct-sale")
+	if err != nil || reconstructed.ID != reconstructionID {
+		t.Fatalf("reconstructed sale = %#v, error = %v", reconstructed, err)
+	}
+	evidencePayload := CreateSaleInput{
+		OperationID: sourceOperationID, DeviceSessionID: device.ID, FencingVersion: device.FencingVersion,
+		CashShiftID: newShiftID, ShiftVersion: recovery.AffectedShiftVersion + 1, CatalogVersion: catalogVersion,
+		Items: []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
+		Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 95000, Status: PaymentConfirmed, ReceivedCents: int64Pointer(95000)}},
+	}
+	evidenceJSON, _ := json.Marshal(evidencePayload)
+	evidenceHash, _ := canonicalRawPayloadHash(evidenceJSON)
+	evidenceOperation := OfflineOperation{
+		OperationID: sourceOperationID, OperationType: "sale", DeviceID: device.DeviceID, DeviceSessionID: device.ID,
+		FencingVersion: device.FencingVersion, Sequence: 4, CreatedAtLocal: grant.IssuedAt.Add(4 * time.Second),
+		Timezone: "America/Argentina/Buenos_Aires", PreviousHash: openHash, PayloadHash: evidenceHash, Authorization: grant.Token, Payload: evidenceJSON,
+	}
+	evidenceResult, err := service.SyncOperations(ctx, SyncBatchInput{Operations: []OfflineOperation{evidenceOperation}}, "request-recovery-evidence")
+	if err != nil || len(evidenceResult.ACKs) != 1 || evidenceResult.ACKs[0].SaleID == nil || *evidenceResult.ACKs[0].SaleID != reconstructed.ID {
+		t.Fatalf("matched recovery evidence = %#v, error = %v", evidenceResult, err)
+	}
+	details, err = service.UpdateRecoveryControls(ctx, recovery.ID, RecoveryControlsInput{
+		JournalStatus: "imported", GapsDocumented: true, DigitalPaymentsReviewed: true, InventoryCounted: true, OwnerApproved: true,
+	}, actorID, "request-recovery-controls")
+	if err != nil || !details.OwnerApproved {
+		t.Fatalf("recovery controls = %#v, error = %v", details, err)
+	}
+	details, err = service.CloseRecovery(ctx, recovery.ID, actorID, "request-recovery-close")
+	if err != nil || details.Status != "resolved" {
+		t.Fatalf("close recovery = %#v, error = %v", details, err)
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM sales WHERE id = $1`, sale.ID); err == nil {
 		t.Fatal("expected sale deletion to be rejected")
 	}
-	for table, want := range map[string]int{"sales": 2, "sale_items": 2, "sale_payments": 3, "cash_movements": 4, "inventory_movements": 2, "inventory_incidents": 2} {
+	for table, want := range map[string]int{"sales": 4, "sale_items": 4, "sale_payments": 5, "cash_movements": 6, "inventory_movements": 4, "inventory_incidents": 4, "sync_operations": 4, "recovery_differences": 1, "recovery_reconstructions": 1} {
 		var got int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&got); err != nil {
 			t.Fatalf("count %s: %v", table, err)

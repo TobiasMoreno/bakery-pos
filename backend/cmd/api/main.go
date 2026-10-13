@@ -45,7 +45,7 @@ func main() {
 	inventoryRepository := inventory.NewPostgresRepository(pool)
 	inventoryService := inventory.NewService(inventoryRepository)
 	posRepository := pos.NewPostgresRepository(pool)
-	posService := pos.NewService(posRepository)
+	posService := pos.NewService(posRepository, cfg.OfflineSigningKey)
 	handler := httpapi.NewServer(authService, pool, httpapi.Options{
 		AllowedOrigin: cfg.AllowedOrigin,
 		CookieSecure:  cfg.CookieSecure,

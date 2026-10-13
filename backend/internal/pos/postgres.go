@@ -256,8 +256,18 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Sale{}, fmt.Errorf("find idempotent sale: %w", err)
 	}
-	if err := requireDevice(ctx, tx, input.DeviceSessionID, input.FencingVersion); err != nil {
-		return Sale{}, err
+	if input.recoveryCaseID == nil {
+		if err := requireDevice(ctx, tx, input.DeviceSessionID, input.FencingVersion); err != nil {
+			return Sale{}, err
+		}
+	} else {
+		var allowed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM device_recovery_cases WHERE id=$1 AND status='open' AND previous_session_id=$2 AND affected_shift_id=$3)`, *input.recoveryCaseID, input.DeviceSessionID, input.CashShiftID).Scan(&allowed); err != nil {
+			return Sale{}, fmt.Errorf("validate recovery reconstruction: %w", err)
+		}
+		if !allowed {
+			return Sale{}, fmt.Errorf("%w: reconstruction does not belong to the recovery case", ErrConflict)
+		}
 	}
 	shift, err := getShift(ctx, tx, input.CashShiftID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -266,24 +276,26 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 	if err != nil {
 		return Sale{}, fmt.Errorf("lock sale cash shift: %w", err)
 	}
-	if shift.Status != "open" || shift.Version != input.ShiftVersion {
+	validShiftStatus := shift.Status == "open" || (input.recoveryCaseID != nil && shift.Status == "reconciliation_required")
+	if !validShiftStatus || shift.Version != input.ShiftVersion {
 		return Sale{}, fmt.Errorf("%w: cash shift version changed", ErrConflict)
 	}
 	if shift.DeviceSessionID != input.DeviceSessionID {
 		return Sale{}, fmt.Errorf("%w: cash shift belongs to another pos session", ErrConflict)
 	}
-	var catalogVersion int64
-	if err := tx.QueryRow(ctx, `SELECT version FROM catalog_state WHERE singleton = TRUE`).Scan(&catalogVersion); err != nil {
+	var currentCatalogVersion int64
+	if err := tx.QueryRow(ctx, `SELECT version FROM catalog_state WHERE singleton = TRUE`).Scan(&currentCatalogVersion); err != nil {
 		return Sale{}, fmt.Errorf("read catalog version: %w", err)
 	}
-	if catalogVersion != input.CatalogVersion {
+	if input.offlineCatalogAt == nil && currentCatalogVersion != input.CatalogVersion {
 		return Sale{}, fmt.Errorf("%w: catalog changed; refresh prices before charging", ErrConflict)
 	}
+	catalogVersion := input.CatalogVersion
 
 	items := make([]SaleItem, 0, len(input.Items))
 	var total int64
 	for index, requested := range input.Items {
-		item, err := loadPricedItem(ctx, tx, requested, catalogVersion, index+1, input.OperationID)
+		item, err := loadPricedItem(ctx, tx, requested, catalogVersion, index+1, input.OperationID, input.offlineCatalogAt)
 		if err != nil {
 			return Sale{}, err
 		}
@@ -298,6 +310,10 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 	var effectiveTotal, cashTotal int64
 	paymentState := "settled"
 	now := r.now().UTC()
+	completedAt := now
+	if input.offlineCreatedAt != nil {
+		completedAt = input.offlineCreatedAt.UTC()
+	}
 	for index, requested := range input.Payments {
 		if requested.AmountCents > math.MaxInt64-effectiveTotal {
 			return Sale{}, fmt.Errorf("%w: payment total is out of range", ErrInvalid)
@@ -336,7 +352,7 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 	sale := Sale{
 		ID: input.OperationID, CashShiftID: input.CashShiftID, DeviceSessionID: input.DeviceSessionID,
 		FencingVersion: input.FencingVersion, ActorID: actorID, Status: "completed", PaymentState: paymentState,
-		CatalogVersion: catalogVersion, SubtotalCents: total, TotalCents: total, CompletedAt: now,
+		CatalogVersion: catalogVersion, SubtotalCents: total, TotalCents: total, CompletedAt: completedAt,
 		Items: items, Payments: payments, InventoryIncidents: make([]InventoryIncident, 0),
 	}
 	const insertSale = `
@@ -344,7 +360,7 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 		    payment_state, catalog_version, subtotal_cents, total_cents, request_id, payload_hash, completed_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $8, $9, $10, $11, $11)`
 	if _, err := tx.Exec(ctx, insertSale, sale.ID, sale.CashShiftID, sale.DeviceSessionID, sale.FencingVersion,
-		actorID, sale.PaymentState, sale.CatalogVersion, sale.TotalCents, requestID, payloadHash, now); err != nil {
+		actorID, sale.PaymentState, sale.CatalogVersion, sale.TotalCents, requestID, payloadHash, completedAt); err != nil {
 		return Sale{}, mapWriteError("insert sale", err)
 	}
 
@@ -550,20 +566,34 @@ func getShift(ctx context.Context, queryer queryer, id uuid.UUID, lock bool) (Ca
 	return shift, nil
 }
 
-func loadPricedItem(ctx context.Context, queryer queryer, requested SaleItemInput, catalogVersion int64, lineNumber int, saleID uuid.UUID) (SaleItem, error) {
+func loadPricedItem(ctx context.Context, queryer queryer, requested SaleItemInput, catalogVersion int64, lineNumber int, saleID uuid.UUID, priceAt *time.Time) (SaleItem, error) {
 	var item SaleItem
 	item.ID = uuid.NewSHA1(saleID, []byte(fmt.Sprintf("item:%d", lineNumber)))
 	item.LineNumber = lineNumber
 	item.ProductID = requested.ProductID
 	item.Quantity = requested.Quantity
 	item.CatalogVersion = catalogVersion
-	const query = `
+	const currentQuery = `
 		SELECT p.name, p.sale_mode, p.base_unit, pp.amount_cents, pp.price_unit
 		FROM products p
 		JOIN product_prices pp ON pp.product_id = p.id AND pp.effective_to IS NULL
 		WHERE p.id = $1 AND p.active = TRUE AND p.sellable = TRUE
 		FOR SHARE OF p, pp`
-	if err := queryer.QueryRow(ctx, query, requested.ProductID).Scan(&item.ProductName, &item.SaleMode, &item.BaseUnit, &item.UnitPriceCents, &item.PriceUnit); errors.Is(err, pgx.ErrNoRows) {
+	const historicalQuery = `
+		SELECT p.name, p.sale_mode, p.base_unit, pp.amount_cents, pp.price_unit
+		FROM products p
+		JOIN product_prices pp ON pp.product_id = p.id
+		WHERE p.id = $1 AND pp.effective_from <= $2
+		  AND (pp.effective_to IS NULL OR pp.effective_to > $2)
+		ORDER BY pp.effective_from DESC LIMIT 1
+		FOR SHARE OF p, pp`
+	var err error
+	if priceAt == nil {
+		err = queryer.QueryRow(ctx, currentQuery, requested.ProductID).Scan(&item.ProductName, &item.SaleMode, &item.BaseUnit, &item.UnitPriceCents, &item.PriceUnit)
+	} else {
+		err = queryer.QueryRow(ctx, historicalQuery, requested.ProductID, priceAt.UTC()).Scan(&item.ProductName, &item.SaleMode, &item.BaseUnit, &item.UnitPriceCents, &item.PriceUnit)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		return SaleItem{}, fmt.Errorf("%w: product is inactive, not sellable or has no price", ErrNotFound)
 	} else if err != nil {
 		return SaleItem{}, fmt.Errorf("load sale product: %w", err)

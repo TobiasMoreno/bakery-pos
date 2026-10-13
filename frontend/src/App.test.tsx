@@ -66,6 +66,7 @@ describe('App', () => {
       .mockResolvedValueOnce(snapshot)
       .mockResolvedValueOnce(shift)
       .mockResolvedValueOnce(sales)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ recovery: null }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [] }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -80,7 +81,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Catálogo' }))
     expect(await screen.findByRole('heading', { name: 'Buen día, Dueño Demo.' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: '+ Nuevo producto' })).toBeInTheDocument()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9))
   })
 
   it('keeps catalog read-only for an employee', async () => {

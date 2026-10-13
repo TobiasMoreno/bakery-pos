@@ -1,24 +1,50 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import {
   APIError,
+  addRecoveryDifference,
   acquirePOSDevice,
   closeCashShift,
-  createSale,
+  closeRecovery,
+  forcePOSRecovery,
+  getActiveRecovery,
   getCatalogSnapshot,
   getCurrentCashShift,
+  getSale,
+  issueOfflineAuthorization,
   listSales,
   openCashShift,
   recordCashMovement,
+  reconstructRecoverySale,
+  syncOfflineOperations,
+  updateRecoveryControls,
   type CashMovementType,
   type CashShift,
   type CatalogSnapshot,
   type DeviceSession,
   type PaymentMethod,
   type Product,
+  type RecoveryDetails,
   type Sale,
   type User,
 } from './api'
 import { calculateLineSubtotal, centsToInput, formatARS, parseARSCents } from './money'
+import {
+  applySyncACKs,
+  blockingCollectingIntent,
+  consolidateIntent,
+  createCheckoutIntent,
+  enqueueOfflineOperation,
+  initializeOfflineStorage,
+  loadPreparedContext,
+  markIntentCollecting,
+  markSending,
+  markSyncFailed,
+  pendingOperationCount,
+  pendingOperations,
+  savePreparedContext,
+  type CheckoutIntent,
+  type PreparedContext,
+} from './offline'
 
 interface POSDashboardProps {
   user: User
@@ -26,7 +52,7 @@ interface POSDashboardProps {
   onLogout: () => Promise<void>
 }
 
-type View = 'sale' | 'cash' | 'history'
+type View = 'sale' | 'cash' | 'history' | 'recovery'
 type CartLine = { product: Product; quantity: string }
 type PaymentDraft = {
   id: string
@@ -36,8 +62,10 @@ type PaymentDraft = {
   reference: string
   verified: boolean
 }
+type ConnectionState = 'synced' | 'offline' | 'syncing' | 'conflict' | 'recovery'
 
 const deviceStorageKey = 'bakery-pos-device-id'
+const durableLocalStorageAvailable = typeof indexedDB !== 'undefined'
 
 function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
   const [view, setView] = useState<View>('sale')
@@ -55,32 +83,70 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loggingOut, setLoggingOut] = useState(false)
+  const [prepared, setPrepared] = useState<PreparedContext | null>(null)
+  const [intent, setIntent] = useState<CheckoutIntent | null>(null)
+  const [pendingCount, setPendingCount] = useState(0)
+  const [connection, setConnection] = useState<ConnectionState>(navigator.onLine ? 'synced' : 'offline')
+  const [recovery, setRecovery] = useState<RecoveryDetails | null>(null)
 
   useEffect(() => {
     let active = true
-    const deviceID = getOrCreateDeviceID()
-    void Promise.all([
-      acquirePOSDevice(deviceID, deviceLabel()),
-      getCatalogSnapshot(),
-      getCurrentCashShift(),
-      listSales(),
-    ])
-      .then(([nextDevice, nextSnapshot, nextShift, history]) => {
+    void (durableLocalStorageAvailable ? initializeOfflineStorage() : Promise.resolve()).then(async () => {
+      if (durableLocalStorageAvailable) {
+        const blocking = await blockingCollectingIntent()
+        const count = await pendingOperationCount()
+        if (active) { setIntent(blocking); setPendingCount(count) }
+      }
+      const deviceID = getOrCreateDeviceID()
+      try {
+        const [nextDevice, nextSnapshot, nextShift, history] = await Promise.all([
+          acquirePOSDevice(deviceID, deviceLabel()), getCatalogSnapshot(), getCurrentCashShift(), listSales(),
+        ])
         if (!active) return
         setDevice(nextDevice)
         setSnapshot(nextSnapshot)
         setShift(nextShift)
         setSales(history.items)
-      })
-      .catch((caught: unknown) => {
-        if (active) setError(apiMessage(caught))
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
+        setConnection('synced')
+      } catch (caught) {
+        const local = await loadPreparedContext()
+        if (!active) return
+        if (!local) throw caught
+        setPrepared(local); setDevice(local.device); setSnapshot(local.snapshot); setShift(local.shift); setConnection('offline')
+      }
+    }).catch((caught: unknown) => { if (active) setError(apiMessage(caught)) })
+      .finally(() => { if (active) setLoading(false) })
     return () => {
       active = false
     }
+  }, [])
+
+  useEffect(() => {
+    if (user.role !== 'owner' || !navigator.onLine) return
+    void getActiveRecovery().then(setRecovery).catch(() => undefined)
+  }, [user.role, connection])
+
+  useEffect(() => {
+    if (!durableLocalStorageAvailable || !device || !shift || !snapshot || !navigator.onLine) return
+    let active = true
+    void issueOfflineAuthorization({
+      device_session_id: device.id, fencing_version: device.fencing_version,
+      cash_shift_id: shift.id, shift_version: shift.version, catalog_version: snapshot.version,
+    }).then(async (authorization) => {
+      const context = { device, shift, snapshot, authorization }
+      await savePreparedContext(context)
+      if (active) setPrepared(context)
+    }).catch((caught: unknown) => { if (active) setError(`No se pudo preparar el modo offline: ${apiMessage(caught)}`) })
+    return () => { active = false }
+  }, [device, shift, snapshot])
+
+  useEffect(() => {
+    if (!durableLocalStorageAvailable) return
+    const online = () => { setConnection('syncing'); void synchronize() }
+    const offline = () => setConnection('offline')
+    window.addEventListener('online', online); window.addEventListener('offline', offline)
+    if (navigator.onLine) void synchronize()
+    return () => { window.removeEventListener('online', online); window.removeEventListener('offline', offline) }
   }, [])
 
   const products = useMemo(() => {
@@ -118,7 +184,7 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
     })
   }
 
-  function beginCheckout() {
+  async function beginCheckout() {
     if (!shift) {
       setError('Abrí un turno de caja antes de cobrar.')
       setView('cash')
@@ -128,15 +194,30 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
       setError('Revisá las cantidades del carrito.')
       return
     }
-    const amount = centsToInput(total)
-    setPayments([{ id: newID(), method: 'cash', amount, received: amount, reference: '', verified: true }])
-    setCheckoutOpen(true)
-    setError(null)
+    if (!prepared) {
+      setError('Este dispositivo todavía no completó la preparación offline. Esperá la confirmación antes de cobrar.')
+      return
+    }
+    if (intent?.status === 'collecting') {
+      setError('Hay un cobro sin consolidar. Resolvelo antes de iniciar otra venta.')
+      return
+    }
+    try {
+      const nextIntent = await createCheckoutIntent(cart.map((line) => ({ product_id: line.product.id, quantity: line.quantity })), total)
+      await markIntentCollecting(nextIntent.id)
+      setIntent({ ...nextIntent, status: 'collecting' })
+      const amount = centsToInput(total)
+      setPayments([{ id: newID(), method: 'cash', amount, received: amount, reference: '', verified: true }])
+      setCheckoutOpen(true)
+      setError(null)
+    } catch (caught) {
+      setError(`No se habilitó el cobro porque no se pudo guardar el intento: ${apiMessage(caught)}`)
+    }
   }
 
   function submitSale(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!device || !shift || !snapshot) return
+    if (!device || !shift || !snapshot || !prepared || !intent) return
     const parsedPayments = payments.map((payment) => ({ payment, amount: parseARSCents(payment.amount) }))
     if (parsedPayments.some(({ amount }) => amount === undefined) || parsedPayments.reduce((sum, row) => sum + (row.amount ?? 0), 0) !== total) {
       setError('Las formas de pago deben sumar exactamente el total.')
@@ -154,7 +235,7 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
       return {
         method: payment.method,
         amount_cents: amount!,
-        status: payment.method === 'cash' || payment.verified ? 'confirmed' as const : 'reported' as const,
+        status: payment.method === 'cash' || (payment.verified && navigator.onLine) ? 'confirmed' as const : 'reported' as const,
         ...(received === undefined ? {} : { received_cents: received }),
         external_reference: payment.reference.trim(),
         verification_method: payment.method === 'cash' ? '' : payment.verified ? 'Verificación manual del operador' : '',
@@ -162,7 +243,7 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
     })
     setSubmitting(true)
     setError(null)
-    void createSale({
+    const payload = {
       operation_id: newID(),
       device_session_id: device.id,
       fencing_version: device.fencing_version,
@@ -171,16 +252,50 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
       catalog_version: snapshot.version,
       items: cart.map((line) => ({ product_id: line.product.id, quantity: line.quantity })),
       payments: apiPayments,
-    })
-      .then((sale) => {
-        setLastSale(sale)
-        setSales((current) => [sale, ...current.filter((item) => item.id !== sale.id)])
-        setShift((current) => current ? { ...current, version: sale.cash_shift_version, expected_cash_cents: current.expected_cash_cents + cashAmount(sale) } : current)
+    }
+    void consolidateIntent(intent.id, payload, prepared)
+      .then(async () => {
+        const cashCents = apiPayments.filter((payment) => payment.method === 'cash').reduce((sum, payment) => sum + payment.amount_cents, 0)
+        const nextShift = { ...shift, version: shift.version + 1, expected_cash_cents: shift.expected_cash_cents + cashCents }
+        const nextPrepared = { ...prepared, shift: nextShift }
+        setPrepared(nextPrepared); setShift(nextShift); await savePreparedContext(nextPrepared)
         setCart([])
         setCheckoutOpen(false)
+        setIntent(null)
+        setPendingCount(await pendingOperationCount())
+        if (navigator.onLine) await synchronize()
+        else setConnection('offline')
       })
-      .catch((caught: unknown) => setError(apiMessage(caught)))
+      .catch((caught: unknown) => setError(`Cobro sin consolidar: ${apiMessage(caught)} No inicies otra venta.`))
       .finally(() => setSubmitting(false))
+  }
+
+  async function synchronize() {
+    if (!navigator.onLine) { setConnection('offline'); return }
+    const operations = await pendingOperations()
+    if (operations.length === 0) { setPendingCount(0); setConnection('synced'); return }
+    const ids = operations.map((operation) => operation.operation_id)
+    setConnection('syncing')
+    await markSending(ids)
+    try {
+      const result = await syncOfflineOperations(operations)
+      await applySyncACKs(result.acks)
+      if (result.acks.some((ack) => ack.status === 'recovery_evidence')) {
+        setConnection('recovery')
+      } else {
+        const synchronizedSales = await Promise.all(result.acks.flatMap((ack) => ack.sale_id ? [getSale(ack.sale_id)] : []))
+        setSales((current) => [...synchronizedSales, ...current.filter((sale) => !synchronizedSales.some((next) => next.id === sale.id))])
+        if (synchronizedSales[0]) setLastSale(synchronizedSales[0])
+        setConnection('synced')
+      }
+      setPendingCount(await pendingOperationCount())
+    } catch (caught) {
+      await markSyncFailed(ids)
+      setPendingCount(await pendingOperationCount())
+      if (caught instanceof APIError && (caught.code === 'sync_conflict' || caught.code === 'recovery_required')) setConnection('conflict')
+      else setConnection(navigator.onLine ? 'conflict' : 'offline')
+      setError(apiMessage(caught))
+    }
   }
 
   return (
@@ -191,9 +306,11 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
           <button className={view === 'sale' ? 'active' : ''} onClick={() => setView('sale')}>Venta</button>
           <button className={view === 'cash' ? 'active' : ''} onClick={() => setView('cash')}>Caja</button>
           <button className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>Historial</button>
+          {user.role === 'owner' && <button className={view === 'recovery' ? 'active' : ''} onClick={() => setView('recovery')}>Recuperación</button>}
           <button onClick={onOpenCatalog}>Catálogo</button>
         </nav>
         <div className="user-actions">
+          <button className={`sync-chip ${connection}`} onClick={() => void synchronize()}>{connectionLabel(connection, pendingCount)}</button>
           <span className={shift ? 'shift-chip open' : 'shift-chip'}>{shift ? `Caja abierta · v${shift.version}` : 'Caja cerrada'}</span>
           <button className="text-button" disabled={loggingOut} onClick={() => {
             setLoggingOut(true)
@@ -203,6 +320,7 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
       </header>
 
       {error && <div className="pos-notice notice notice-error" role="alert">{error}</div>}
+      {intent?.status === 'collecting' && !checkoutOpen && <div className="pos-notice notice notice-warning" role="alert">Cobro sin consolidar. Retomá el cobro abierto; el POS bloquea ventas nuevas para evitar perderlo.</div>}
       {loading ? <section className="pos-loading"><span className="status-dot" />Preparando catálogo, caja y dispositivo…</section> : null}
       {!loading && view === 'sale' && (
         <SaleWorkspace
@@ -216,18 +334,122 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
           total={total}
           onQuantity={(id, quantity) => setCart((current) => current.map((line) => line.product.id === id ? { ...line, quantity } : line))}
           onRemove={(id) => setCart((current) => current.filter((line) => line.product.id !== id))}
-          onCheckout={beginCheckout}
+          onCheckout={() => void beginCheckout()}
           shift={shift}
           lastSale={lastSale}
         />
       )}
-      {!loading && view === 'cash' && <CashWorkspace device={device} shift={shift} onShift={setShift} />}
+      {!loading && view === 'cash' && <CashWorkspace device={device} shift={shift} prepared={prepared} onShift={setShift} onPrepared={(next) => { setPrepared(next); void savePreparedContext(next) }} onJournalChanged={async () => { setPendingCount(await pendingOperationCount()); if (navigator.onLine) await synchronize() }} />}
       {!loading && view === 'history' && <HistoryWorkspace sales={sales} />}
+      {!loading && view === 'recovery' && user.role === 'owner' && <RecoveryWorkspace device={device} snapshot={snapshot} recovery={recovery} onRecovery={setRecovery} />}
 
       {checkoutOpen && (
-        <CheckoutPanel total={total} payments={payments} onPayments={setPayments} onClose={() => setCheckoutOpen(false)} onSubmit={submitSale} submitting={submitting} />
+        <CheckoutPanel total={total} payments={payments} onPayments={setPayments} onClose={() => { setCheckoutOpen(false); setError('Cobro sin consolidar. Volvé a abrirlo y confirmá la venta antes de continuar.') }} onSubmit={submitSale} submitting={submitting} offline={!navigator.onLine} />
       )}
     </main>
+  )
+}
+
+function RecoveryWorkspace({ device, snapshot, recovery, onRecovery }: {
+  device: DeviceSession | null
+  snapshot: CatalogSnapshot | null
+  recovery: RecoveryDetails | null
+  onRecovery: (recovery: RecoveryDetails | null) => void
+}) {
+  const [reason, setReason] = useState('Pérdida o rotura del dispositivo activo')
+  const [cashCount, setCashCount] = useState('')
+  const [kind, setKind] = useState<RecoveryDetails['differences'][number]['kind']>('sequence_gap')
+  const [differenceAmount, setDifferenceAmount] = useState('')
+  const [description, setDescription] = useState('')
+  const [productID, setProductID] = useState('')
+  const [quantity, setQuantity] = useState('1')
+  const [saleAmount, setSaleAmount] = useState('')
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash')
+  const [sourceOperationID, setSourceOperationID] = useState('')
+  const [certainty, setCertainty] = useState<'exact' | 'probable'>('probable')
+  const [evidence, setEvidence] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  async function refresh() { onRecovery(await getActiveRecovery()) }
+
+  function force(event: FormEvent) {
+    event.preventDefault()
+    const cents = parseNonNegativeCents(cashCount)
+    if (!device || cents === undefined) return setError('Necesitás la sesión previa y el efectivo contado.')
+    setBusy(true); setError(null)
+    void forcePOSRecovery({ previous_session_id: device.id, device_id: getOrCreateDeviceID(), device_name: deviceLabel(), reason, cash_count_cents: cents })
+      .then(refresh).then(() => setMessage('La sesión anterior quedó cercada. La conciliación está abierta.'))
+      .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
+  }
+
+  function addDifference(event: FormEvent) {
+    event.preventDefault()
+    if (!recovery) return
+    const amount = differenceAmount.trim() ? parseNonNegativeCents(differenceAmount) : undefined
+    if (differenceAmount.trim() && amount === undefined) return setError('El importe de la diferencia no es válido.')
+    setBusy(true); setError(null)
+    void addRecoveryDifference(recovery.id, { id: newID(), kind, ...(amount === undefined ? {} : { amount_cents: amount }), description })
+      .then((next) => { onRecovery(next); setDescription(''); setDifferenceAmount(''); setMessage('Diferencia incorporada a la conciliación.') })
+      .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
+  }
+
+  function reconstruct(event: FormEvent) {
+    event.preventDefault()
+    const amount = parseARSCents(saleAmount)
+    if (!recovery?.affected_shift_id || !snapshot || !productID || amount === undefined) return setError('Completá producto, cantidad, importe y evidencia.')
+    const operationID = newID()
+    setBusy(true); setError(null)
+    void reconstructRecoverySale(recovery.id, {
+      reconciliation_operation_id: operationID,
+      ...(sourceOperationID.trim() ? { source_operation_id: sourceOperationID.trim() } : {}),
+      certainty, evidence,
+      sale: {
+        operation_id: operationID, device_session_id: recovery.previous_session_id,
+        fencing_version: recovery.previous_fencing_version, cash_shift_id: recovery.affected_shift_id,
+        shift_version: recovery.affected_shift_version, catalog_version: snapshot.version,
+        items: [{ product_id: productID, quantity }],
+        payments: [{ method: paymentMethod, amount_cents: amount, status: paymentMethod === 'cash' ? 'confirmed' : 'reported', external_reference: '', verification_method: '', ...(paymentMethod === 'cash' ? { received_cents: amount } : {}) }],
+      },
+    }).then(refresh).then(() => { setEvidence(''); setSourceOperationID(''); setSaleAmount(''); setMessage('Venta reconstruida y vinculada a la evidencia.') })
+      .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
+  }
+
+  function saveControls(event: FormEvent) {
+    event.preventDefault()
+    if (!recovery) return
+    setBusy(true); setError(null)
+    void updateRecoveryControls(recovery.id, {
+      journal_status: recovery.journal_status === 'pending' ? 'imported' : recovery.journal_status,
+      gaps_documented: recovery.gaps_documented,
+      digital_payments_reviewed: recovery.digital_payments_reviewed,
+      inventory_counted: recovery.inventory_counted,
+      owner_approved: recovery.owner_approved,
+    }).then((next) => { onRecovery(next); setMessage('Controles guardados.') })
+      .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
+  }
+
+  const patchControl = (patch: Partial<RecoveryDetails>) => recovery && onRecovery({ ...recovery, ...patch })
+
+  if (!recovery) return (
+    <section className="recovery-workspace"><header className="pos-heading"><div><p className="eyebrow">Sólo dueño</p><h1>Recuperación extraordinaria</h1></div></header>
+      {error && <div className="notice notice-error" role="alert">{error}</div>}
+      <form className="cash-card recovery-force" onSubmit={force}><p>Cercá el puesto activo únicamente si se perdió o quedó inutilizable. Las ventas no sincronizadas deberán conciliarse.</p><label><span>Motivo verificable</span><textarea value={reason} onChange={(event) => setReason(event.target.value)} minLength={10} maxLength={500} required /></label><label><span>Efectivo contado al recuperar</span><input value={cashCount} onChange={(event) => setCashCount(event.target.value)} inputMode="decimal" required /></label><button className="danger-button" disabled={busy || !device}>Forzar recuperación</button></form>
+    </section>
+  )
+
+  return (
+    <section className="recovery-workspace">
+      <header className="pos-heading"><div><p className="eyebrow">Conciliación trazable</p><h1>Caso #{recovery.id.slice(0, 8)}</h1><p>{recovery.reason}</p></div><div className="expected-cash"><span>Arqueo inicial</span><strong>{formatARS(recovery.cash_count_cents)}</strong><small>ACK {recovery.last_ack_sequence}</small></div></header>
+      {error && <div className="notice notice-error" role="alert">{error}</div>}{message && <div className="notice notice-success" role="status">{message}</div>}
+      <div className="recovery-grid">
+        <form className="cash-card" onSubmit={addDifference}><p className="eyebrow">Brechas explícitas</p><h2>Registrar diferencia</h2><label><span>Tipo</span><select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="sequence_gap">Brecha de secuencia</option><option value="unknown_sale_total">Venta sin detalle</option><option value="cash">Efectivo</option><option value="digital_payment">Pago digital</option><option value="inventory">Inventario</option></select></label><label><span>Importe, si aplica</span><input value={differenceAmount} onChange={(event) => setDifferenceAmount(event.target.value)} inputMode="decimal" /></label><label><span>Descripción y evidencia</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} minLength={3} maxLength={500} required /></label><button className="action-button" disabled={busy}>Agregar diferencia</button></form>
+        {recovery.affected_shift_id && <form className="cash-card" onSubmit={reconstruct}><p className="eyebrow">Venta conocida</p><h2>Reconstruir sin duplicar</h2><label><span>Producto</span><select value={productID} onChange={(event) => setProductID(event.target.value)} required><option value="">Seleccionar…</option>{snapshot?.products.filter((product) => product.sellable).map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label><label><span>Cantidad exacta</span><input value={quantity} onChange={(event) => setQuantity(event.target.value)} inputMode="decimal" required /></label><label><span>Importe cobrado</span><input value={saleAmount} onChange={(event) => setSaleAmount(event.target.value)} inputMode="decimal" required /></label><label><span>Medio</span><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}><option value="cash">Efectivo</option><option value="transfer">Transferencia</option><option value="qr">QR</option><option value="card">Tarjeta</option><option value="other">Otro</option></select></label><label><span>ID original, si existe</span><input value={sourceOperationID} onChange={(event) => setSourceOperationID(event.target.value)} placeholder="UUID del diario perdido" /></label><label><span>Certeza</span><select value={certainty} onChange={(event) => setCertainty(event.target.value as typeof certainty)}><option value="exact">Exacta</option><option value="probable">Probable</option></select></label><label><span>Evidencia</span><textarea value={evidence} onChange={(event) => setEvidence(event.target.value)} minLength={3} maxLength={500} required /></label><button className="action-button" disabled={busy}>Reconstruir venta</button></form>}
+        <form className="cash-card recovery-controls" onSubmit={saveControls}><p className="eyebrow">Cierre controlado</p><h2>Lista de conciliación</h2><label><span>Estado del diario</span><select value={recovery.journal_status} onChange={(event) => patchControl({ journal_status: event.target.value as RecoveryDetails['journal_status'] })}><option value="pending">Pendiente</option><option value="imported">Importado</option><option value="unrecoverable">Irrecuperable declarado</option></select></label><label className="verify-check"><input type="checkbox" checked={recovery.gaps_documented} onChange={(event) => patchControl({ gaps_documented: event.target.checked })} /><span>Brechas documentadas</span></label><label className="verify-check"><input type="checkbox" checked={recovery.digital_payments_reviewed} onChange={(event) => patchControl({ digital_payments_reviewed: event.target.checked })} /><span>Pagos digitales revisados</span></label><label className="verify-check"><input type="checkbox" checked={recovery.inventory_counted} onChange={(event) => patchControl({ inventory_counted: event.target.checked })} /><span>Inventario contado</span></label><label className="verify-check"><input type="checkbox" checked={recovery.owner_approved} onChange={(event) => patchControl({ owner_approved: event.target.checked })} /><span>Aprobación final del dueño</span></label><button className="quiet-button" disabled={busy || recovery.journal_status === 'pending'}>Guardar controles</button><button type="button" className="danger-button" disabled={busy || recovery.journal_status === 'pending' || !recovery.gaps_documented || !recovery.digital_payments_reviewed || !recovery.inventory_counted || !recovery.owner_approved} onClick={() => { setBusy(true); void closeRecovery(recovery.id).then((next) => { onRecovery(next); setMessage('Conciliación cerrada sin borrar evidencia.') }).catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false)) }}>Cerrar conciliación</button></form>
+      </div>
+      <div className="recovery-differences"><h2>Diferencias registradas</h2>{recovery.differences.length ? recovery.differences.map((item) => <article key={item.id}><strong>{item.kind.replaceAll('_', ' ')}</strong><span>{item.amount_cents === undefined ? 'Sin importe' : formatARS(item.amount_cents)}</span><p>{item.description}</p></article>) : <p>Sin diferencias documentadas todavía.</p>}</div>
+    </section>
   )
 }
 
@@ -249,7 +471,7 @@ function SaleWorkspace(props: {
   return (
     <section className="pos-layout">
       <div className="product-picker">
-        <header className="pos-heading"><div><p className="eyebrow">Venta online · fase 3</p><h1>¿Qué sale hoy?</h1></div><span>{props.products.length} productos</span></header>
+        <header className="pos-heading"><div><p className="eyebrow">Venta resiliente · fase 4</p><h1>¿Qué sale hoy?</h1></div><span>{props.products.length} productos</span></header>
         <label className="pos-search"><span>Buscar o escanear</span><input autoFocus value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="Medialuna, pan o código…" /></label>
         <div className="product-grid">
           {props.products.map((product) => (
@@ -286,13 +508,14 @@ function SaleWorkspace(props: {
   )
 }
 
-function CheckoutPanel({ total, payments, onPayments, onClose, onSubmit, submitting }: {
+function CheckoutPanel({ total, payments, onPayments, onClose, onSubmit, submitting, offline }: {
   total: number
   payments: PaymentDraft[]
   onPayments: (payments: PaymentDraft[]) => void
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
   submitting: boolean
+  offline: boolean
 }) {
   function patchPayment(id: string, patch: Partial<PaymentDraft>) {
     onPayments(payments.map((payment) => payment.id === id ? { ...payment, ...patch } : payment))
@@ -300,7 +523,8 @@ function CheckoutPanel({ total, payments, onPayments, onClose, onSubmit, submitt
   return (
     <div className="checkout-backdrop" role="presentation">
       <form className="checkout-sheet" onSubmit={onSubmit} aria-labelledby="checkout-title">
-        <header><div><p className="eyebrow">Cobro</p><h2 id="checkout-title">Total {formatARS(total)}</h2></div><button type="button" className="panel-close" onClick={onClose}>Cerrar</button></header>
+        <header><div><p className="eyebrow">Cobro {offline ? 'offline' : 'protegido'}</p><h2 id="checkout-title">Total {formatARS(total)}</h2></div><button type="button" className="panel-close" onClick={onClose}>Ocultar</button></header>
+        {offline && <div className="notice notice-warning">Sin conexión: el cobro quedará guardado localmente. Los pagos digitales se registran como reportados.</div>}
         <div className="payment-list">
           {payments.map((payment, index) => (
             <section className="payment-row" key={payment.id}>
@@ -320,7 +544,14 @@ function CheckoutPanel({ total, payments, onPayments, onClose, onSubmit, submitt
   )
 }
 
-function CashWorkspace({ device, shift, onShift }: { device: DeviceSession | null; shift: CashShift | null; onShift: (shift: CashShift | null) => void }) {
+function CashWorkspace({ device, shift, prepared, onShift, onPrepared, onJournalChanged }: {
+  device: DeviceSession | null
+  shift: CashShift | null
+  prepared: PreparedContext | null
+  onShift: (shift: CashShift | null) => void
+  onPrepared: (context: PreparedContext) => void
+  onJournalChanged: () => Promise<void>
+}) {
   const [opening, setOpening] = useState('')
   const [kind, setKind] = useState<CashMovementType>('withdrawal')
   const [amount, setAmount] = useState('')
@@ -336,14 +567,29 @@ function CashWorkspace({ device, shift, onShift }: { device: DeviceSession | nul
     const cents = parseNonNegativeCents(opening)
     if (!device || cents === undefined) return setError('Ingresá el efectivo inicial, incluso si es cero.')
     setBusy(true); setError(null)
-    void openCashShift({ device_session_id: device.id, fencing_version: device.fencing_version, opening_cash_cents: cents, opening_note: '' })
-      .then((next) => { onShift(next); setMessage('Turno abierto. Ya podés registrar ventas.') })
+    const onlineOpen = () => openCashShift({ device_session_id: device.id, fencing_version: device.fencing_version, opening_cash_cents: cents, opening_note: '' })
+    const queuedOpen = async () => {
+      if (!prepared) return onlineOpen()
+      const next: CashShift = {
+        id: newID(), status: 'open', version: 1, device_session_id: device.id, opened_by: prepared.authorization.user_id,
+        opening_cash_cents: cents, opening_note: '', opened_at: new Date().toISOString(), expected_cash_cents: cents,
+      }
+      await enqueueOfflineOperation('shift_open', {
+        id: next.id, previous_cash_shift_id: prepared.shift.id, device_session_id: device.id,
+        fencing_version: device.fencing_version, opening_cash_cents: cents, opening_note: '',
+      }, prepared)
+      onPrepared({ ...prepared, shift: next })
+      return next
+    }
+    void queuedOpen()
+      .then(async (next) => { onShift(next); setOpening(''); setMessage(`Turno ${prepared ? 'guardado localmente' : 'abierto'}. Ya podés registrar ventas.`); if (prepared) await onJournalChanged() })
       .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
   }
 
   function movement(event: FormEvent) {
     event.preventDefault()
     const cents = parseARSCents(amount)
+    if (!navigator.onLine) return setError('Los movimientos manuales requieren conexión en el MVP. Las ventas y el relevo de turno sí continúan offline.')
     if (!shift || cents === undefined) return setError('Ingresá un importe positivo.')
     setBusy(true); setError(null)
     void recordCashMovement(shift.id, { id: newID(), expected_version: shift.version, movement_type: kind, amount_cents: cents, reason, recipient })
@@ -356,8 +602,18 @@ function CashWorkspace({ device, shift, onShift }: { device: DeviceSession | nul
     const cents = parseNonNegativeCents(counted)
     if (!shift || cents === undefined) return setError('Ingresá el efectivo contado.')
     setBusy(true); setError(null)
-    void closeCashShift(shift.id, { expected_version: shift.version, counted_cash_cents: cents, closing_note: '' })
-      .then((closed) => { onShift(null); setMessage(`Turno cerrado. Diferencia: ${formatSignedARS(closed.difference_cents ?? 0)}.`) })
+    const queuedClose = async () => {
+      if (!prepared) return closeCashShift(shift.id, { expected_version: shift.version, counted_cash_cents: cents, closing_note: '' })
+      await enqueueOfflineOperation('shift_close', { cash_shift_id: shift.id, expected_version: shift.version, counted_cash_cents: cents, closing_note: '' }, prepared)
+      const closed: CashShift = {
+        ...shift, status: 'provisional_closed', counted_cash_cents: cents, expected_cash_cents: shift.expected_cash_cents,
+        difference_cents: cents - shift.expected_cash_cents, closing_note: '', closed_at: new Date().toISOString(),
+      }
+      onPrepared({ ...prepared, shift: closed })
+      return closed
+    }
+    void queuedClose()
+      .then(async (closed) => { onShift(null); setCounted(''); setMessage(`Turno ${prepared ? 'cerrado provisionalmente' : 'cerrado'}. Diferencia: ${formatSignedARS(closed.difference_cents ?? 0)}.`); if (prepared) await onJournalChanged() })
       .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
   }
 
@@ -369,8 +625,8 @@ function CashWorkspace({ device, shift, onShift }: { device: DeviceSession | nul
         <form className="cash-card opening-card" onSubmit={open}><p>Contá el efectivo que recibe este turno. Ese importe será la base reproducible del cierre.</p><label><span>Efectivo inicial</span><input value={opening} onChange={(event) => setOpening(event.target.value)} inputMode="decimal" placeholder="30000.00" required /></label><button className="action-button" disabled={busy || !device}>Abrir caja</button></form>
       ) : (
         <div className="cash-grid">
-          <form className="cash-card" onSubmit={movement}><p className="eyebrow">Movimiento manual</p><h2>Ingreso, gasto o retiro</h2><label><span>Tipo</span><select value={kind} onChange={(event) => setKind(event.target.value as CashMovementType)}><option value="withdrawal">Retiro</option><option value="expense">Gasto</option><option value="income">Ingreso excepcional</option></select></label><label><span>Importe</span><input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" required /></label><label><span>Motivo</span><input value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={300} required /></label>{kind === 'withdrawal' && <label><span>Receptor</span><input value={recipient} onChange={(event) => setRecipient(event.target.value)} minLength={2} required /></label>}<button className="action-button" disabled={busy}>Registrar movimiento</button></form>
-          <form className="cash-card closing-card" onSubmit={close}><p className="eyebrow">Arqueo online</p><h2>Cerrar turno</h2><p>El sistema conservará por separado el esperado, lo contado y la diferencia. El cierre no modifica ventas históricas.</p><label><span>Efectivo contado</span><input value={counted} onChange={(event) => setCounted(event.target.value)} inputMode="decimal" required /></label><button className="quiet-button danger-button" disabled={busy}>Cerrar y guardar arqueo</button></form>
+          <form className="cash-card" onSubmit={movement}><p className="eyebrow">Movimiento manual · online</p><h2>Ingreso, gasto o retiro</h2><label><span>Tipo</span><select value={kind} onChange={(event) => setKind(event.target.value as CashMovementType)}><option value="withdrawal">Retiro</option><option value="expense">Gasto</option><option value="income">Ingreso excepcional</option></select></label><label><span>Importe</span><input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" required /></label><label><span>Motivo</span><input value={reason} onChange={(event) => setReason(event.target.value)} minLength={3} maxLength={300} required /></label>{kind === 'withdrawal' && <label><span>Receptor</span><input value={recipient} onChange={(event) => setRecipient(event.target.value)} minLength={2} required /></label>}<button className="action-button" disabled={busy || !navigator.onLine}>Registrar movimiento</button></form>
+          <form className="cash-card closing-card" onSubmit={close}><p className="eyebrow">Arqueo resiliente</p><h2>Cerrar turno</h2><p>Si no hay conexión, el cierre queda provisional en el diario y la próxima apertura se encadena detrás.</p><label><span>Efectivo contado</span><input value={counted} onChange={(event) => setCounted(event.target.value)} inputMode="decimal" required /></label><button className="quiet-button danger-button" disabled={busy}>Cerrar y guardar arqueo</button></form>
         </div>
       )}
     </section>
@@ -386,7 +642,6 @@ function ReceiptCard({ sale, compact = false }: { sale: Sale; compact?: boolean 
   return <article className={compact ? 'receipt-card compact' : 'receipt-card'}><header><span>Comprobante interno · no fiscal</span><strong>#{sale.id.slice(0, 8)}</strong></header>{!compact && <div className="receipt-lines">{sale.items.map((item) => <div key={item.id}><span>{item.product_name} · {item.quantity} {item.base_unit === 'unit' ? 'u.' : item.base_unit}</span><strong>{formatARS(item.subtotal_cents)}</strong></div>)}</div>}<footer><span>{sale.payment_state === 'unverified' ? '⚠ Cobro sin verificar' : '✓ Cobro confirmado'}</span><strong>{formatARS(sale.total_cents)}</strong></footer>{sale.inventory_incidents.length > 0 && <p className="stock-warning">Venta permitida con {sale.inventory_incidents.length} incidencia de stock.</p>}</article>
 }
 
-function cashAmount(sale: Sale) { return sale.payments.filter((payment) => payment.method === 'cash').reduce((sum, payment) => sum + payment.amount_cents, 0) }
 function apiMessage(caught: unknown) { return caught instanceof APIError || caught instanceof Error ? caught.message : 'No pudimos completar la operación.' }
 function newID() { return crypto.randomUUID() }
 function getOrCreateDeviceID() { const stored = localStorage.getItem(deviceStorageKey); if (stored) return stored; const id = newID(); localStorage.setItem(deviceStorageKey, id); return id }
@@ -402,6 +657,14 @@ function addExactQuantities(left: string, right: string) {
   const whole = sum / 1000n
   const fraction = String(sum % 1000n).padStart(3, '0').replace(/0+$/, '')
   return fraction ? `${whole}.${fraction}` : String(whole)
+}
+
+function connectionLabel(state: ConnectionState, pending: number) {
+  if (state === 'syncing') return 'Sincronizando…'
+  if (state === 'conflict') return 'Conflicto · revisar'
+  if (state === 'recovery') return 'Recuperación en curso'
+  if (state === 'offline') return `Sin conexión · ${pending} pendiente${pending === 1 ? '' : 's'}`
+  return pending ? `${pending} pendiente${pending === 1 ? '' : 's'}` : 'Sincronizado'
 }
 
 export default POSDashboard

@@ -163,12 +163,156 @@ func (s *Server) getSale(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sale)
 }
 
+func (s *Server) issueOfflineAuthorization(w http.ResponseWriter, r *http.Request) {
+	var input pos.OfflineAuthorizationRequest
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "La solicitud no es válida.", map[string]any{"reason": err.Error()})
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	grant, err := s.pos.IssueOfflineAuthorization(r.Context(), input, user.ID)
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, grant)
+}
+
+func (s *Server) syncOperations(w http.ResponseWriter, r *http.Request) {
+	var input pos.SyncBatchInput
+	if err := decodeJSONLimit(w, r, &input, 2<<20); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "El lote de sincronización no es válido.", map[string]any{"reason": err.Error()})
+		return
+	}
+	result, err := s.pos.SyncOperations(r.Context(), input, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) syncStatus(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("device_session_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_filter", "La sesión del dispositivo no es válida.", nil)
+		return
+	}
+	status, err := s.pos.SyncStatus(r.Context(), sessionID)
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) forcePOSRecovery(w http.ResponseWriter, r *http.Request) {
+	var input pos.ForceRecoveryInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "La solicitud no es válida.", map[string]any{"reason": err.Error()})
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	recovery, err := s.pos.ForceRecovery(r.Context(), input, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, recovery)
+}
+
+func (s *Server) currentPOSRecovery(w http.ResponseWriter, r *http.Request) {
+	recovery, err := s.pos.ActiveRecovery(r.Context())
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recovery": recovery})
+}
+
+func (s *Server) addRecoveryDifference(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseNamedUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var input pos.RecoveryDifferenceInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "La diferencia no es válida.", nil)
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	details, err := s.pos.AddRecoveryDifference(r.Context(), id, input, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, details)
+}
+
+func (s *Server) updateRecoveryControls(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseNamedUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var input pos.RecoveryControlsInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "Los controles no son válidos.", nil)
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	details, err := s.pos.UpdateRecoveryControls(r.Context(), id, input, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, details)
+}
+
+func (s *Server) reconstructRecoverySale(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseNamedUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var input pos.RecoveryReconstructionInput
+	if err := decodeJSONLimit(w, r, &input, 64<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "La reconstrucción no es válida.", nil)
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	sale, err := s.pos.ReconstructRecoverySale(r.Context(), id, input, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, sale)
+}
+
+func (s *Server) closePOSRecovery(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseNamedUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	details, err := s.pos.CloseRecovery(r.Context(), id, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, details)
+}
+
 func (s *Server) posError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, pos.ErrInvalid):
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_error", "Revisá los datos de la operación.", map[string]any{"reason": err.Error()})
 	case errors.Is(err, pos.ErrPaymentIncomplete):
 		writeError(w, r, http.StatusUnprocessableEntity, "payment_incomplete", "Los pagos efectivos deben cubrir exactamente el total.", nil)
+	case errors.Is(err, pos.ErrGrantInvalid):
+		writeError(w, r, http.StatusUnauthorized, "offline_authorization_invalid", "La autorización offline no es válida o venció.", nil)
+	case errors.Is(err, pos.ErrSyncConflict):
+		writeError(w, r, http.StatusConflict, "sync_conflict", "La secuencia o integridad del diario no coincide.", nil)
+	case errors.Is(err, pos.ErrRecoveryRequired):
+		writeError(w, r, http.StatusConflict, "recovery_required", "El dispositivo está en modo de recuperación.", nil)
 	case errors.Is(err, pos.ErrNoActiveDevice):
 		writeError(w, r, http.StatusConflict, "pos_device_required", "Este equipo ya no es el puesto de venta activo.", nil)
 	case errors.Is(err, pos.ErrNoOpenShift):

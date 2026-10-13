@@ -1,13 +1,17 @@
 package pos
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"bakery-pos/backend/internal/inventory"
 
@@ -24,14 +28,32 @@ type Repository interface {
 	CreateSale(context.Context, CreateSaleInput, uuid.UUID, string, string) (Sale, error)
 	ListSales(context.Context, SaleFilter) ([]Sale, int, error)
 	GetSale(context.Context, uuid.UUID) (Sale, error)
+	ValidateOfflinePreparation(context.Context, OfflineAuthorizationRequest, uuid.UUID) (DeviceSession, error)
+	ReserveSyncOperation(context.Context, OfflineOperation, uuid.UUID, string) (SyncReservation, error)
+	CompleteSyncOperation(context.Context, OfflineOperation, uuid.UUID, uuid.UUID, string) (SyncACK, error)
+	SyncStatus(context.Context, uuid.UUID) (SyncStatus, error)
+	ForceRecovery(context.Context, ForceRecoveryInput, uuid.UUID, string) (RecoveryCase, error)
+	OpenOfflineShift(context.Context, OfflineOpenShiftInput, uuid.UUID, string) (CashShift, error)
+	CloseOfflineShift(context.Context, CloseShiftInput, uuid.UUID, string) (CashShift, error)
+	GetActiveRecovery(context.Context) (*RecoveryDetails, error)
+	AddRecoveryDifference(context.Context, uuid.UUID, RecoveryDifferenceInput, uuid.UUID, string) (RecoveryDetails, error)
+	UpdateRecoveryControls(context.Context, uuid.UUID, RecoveryControlsInput, uuid.UUID, string) (RecoveryDetails, error)
+	CloseRecovery(context.Context, uuid.UUID, uuid.UUID, string) (RecoveryDetails, error)
+	RecordReconstruction(context.Context, uuid.UUID, RecoveryReconstructionInput, Sale, uuid.UUID, string) error
 }
 
 type Service struct {
 	repository Repository
+	signingKey []byte
+	now        func() time.Time
 }
 
-func NewService(repository Repository) *Service {
-	return &Service{repository: repository}
+func NewService(repository Repository, signingKeys ...string) *Service {
+	key := "tests-only-offline-signing-key-32-bytes"
+	if len(signingKeys) > 0 && signingKeys[0] != "" {
+		key = signingKeys[0]
+	}
+	return &Service{repository: repository, signingKey: []byte(key), now: time.Now}
 }
 
 func (s *Service) AcquireDevice(ctx context.Context, input AcquireDeviceInput, actorID uuid.UUID, requestID string) (DeviceSession, error) {
@@ -142,6 +164,273 @@ func (s *Service) GetSale(ctx context.Context, id uuid.UUID) (Sale, error) {
 		return Sale{}, fmt.Errorf("%w: sale id is required", ErrInvalid)
 	}
 	return s.repository.GetSale(ctx, id)
+}
+
+func (s *Service) IssueOfflineAuthorization(ctx context.Context, input OfflineAuthorizationRequest, actorID uuid.UUID) (OfflineAuthorization, error) {
+	if input.DeviceSessionID == uuid.Nil || input.FencingVersion <= 0 || input.CashShiftID == uuid.Nil || input.ShiftVersion <= 0 || input.CatalogVersion <= 0 || actorID == uuid.Nil {
+		return OfflineAuthorization{}, fmt.Errorf("%w: identifiers and versions are required", ErrInvalid)
+	}
+	session, err := s.repository.ValidateOfflinePreparation(ctx, input, actorID)
+	if err != nil {
+		return OfflineAuthorization{}, err
+	}
+	now := s.now().UTC()
+	grant := OfflineAuthorization{
+		UserID: actorID, DeviceID: session.DeviceID, DeviceSessionID: session.ID,
+		FencingVersion: session.FencingVersion, CashShiftID: input.CashShiftID,
+		ShiftVersion: input.ShiftVersion, CatalogVersion: input.CatalogVersion,
+		IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour),
+	}
+	body, err := json.Marshal(grant)
+	if err != nil {
+		return OfflineAuthorization{}, fmt.Errorf("encode offline authorization: %w", err)
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, s.signingKey)
+	_, _ = mac.Write([]byte(encoded))
+	grant.Token = encoded + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return grant, nil
+}
+
+func (s *Service) SyncOperations(ctx context.Context, input SyncBatchInput, requestID string) (SyncBatchResult, error) {
+	if len(input.Operations) == 0 || len(input.Operations) > 50 || requestID == "" {
+		return SyncBatchResult{}, fmt.Errorf("%w: a batch requires between 1 and 50 operations", ErrInvalid)
+	}
+	result := SyncBatchResult{ACKs: make([]SyncACK, 0, len(input.Operations))}
+	for index := range input.Operations {
+		op := input.Operations[index]
+		grant, err := s.validateOfflineOperation(op)
+		if err != nil {
+			return result, err
+		}
+		reservation, err := s.repository.ReserveSyncOperation(ctx, op, grant.UserID, requestID)
+		if err != nil {
+			return result, err
+		}
+		if reservation.ACK != nil {
+			result.ACKs = append(result.ACKs, *reservation.ACK)
+			if reservation.ACK.Status != "acknowledged" {
+				return result, nil
+			}
+			continue
+		}
+		if reservation.Evidence {
+			ack, err := s.repository.CompleteSyncOperation(ctx, op, uuid.Nil, uuid.Nil, requestID)
+			if err != nil {
+				return result, err
+			}
+			result.ACKs = append(result.ACKs, ack)
+			return result, nil
+		}
+		var saleID, shiftID uuid.UUID
+		switch op.OperationType {
+		case "sale":
+			var payload CreateSaleInput
+			if err := strictDecode(op.Payload, &payload); err != nil {
+				return result, fmt.Errorf("%w: invalid sale payload", ErrInvalid)
+			}
+			payload.offlineCatalogAt = &grant.IssuedAt
+			payload.offlineCreatedAt = &op.CreatedAtLocal
+			sale, err := s.CreateSale(ctx, payload, grant.UserID, requestID)
+			if err != nil {
+				return result, err
+			}
+			saleID = sale.ID
+		case "shift_close":
+			var payload OfflineCloseShiftInput
+			if err := strictDecode(op.Payload, &payload); err != nil {
+				return result, fmt.Errorf("%w: invalid shift close payload", ErrInvalid)
+			}
+			closed, err := s.repository.CloseOfflineShift(ctx, CloseShiftInput(payload), grant.UserID, requestID)
+			if err != nil {
+				return result, err
+			}
+			shiftID = closed.ID
+		case "shift_open":
+			var payload OfflineOpenShiftInput
+			if err := strictDecode(op.Payload, &payload); err != nil {
+				return result, fmt.Errorf("%w: invalid shift open payload", ErrInvalid)
+			}
+			opened, err := s.repository.OpenOfflineShift(ctx, payload, grant.UserID, requestID)
+			if err != nil {
+				return result, err
+			}
+			shiftID = opened.ID
+		default:
+			return result, fmt.Errorf("%w: unsupported offline operation", ErrInvalid)
+		}
+		ack, err := s.repository.CompleteSyncOperation(ctx, op, saleID, shiftID, requestID)
+		if err != nil {
+			return result, err
+		}
+		result.ACKs = append(result.ACKs, ack)
+	}
+	return result, nil
+}
+
+func (s *Service) SyncStatus(ctx context.Context, sessionID uuid.UUID) (SyncStatus, error) {
+	if sessionID == uuid.Nil {
+		return SyncStatus{}, fmt.Errorf("%w: device session is required", ErrInvalid)
+	}
+	return s.repository.SyncStatus(ctx, sessionID)
+}
+
+func (s *Service) ForceRecovery(ctx context.Context, input ForceRecoveryInput, actorID uuid.UUID, requestID string) (RecoveryCase, error) {
+	input.DeviceName = strings.TrimSpace(input.DeviceName)
+	input.Reason = strings.TrimSpace(input.Reason)
+	if input.PreviousSessionID == uuid.Nil || input.DeviceID == uuid.Nil || len(input.DeviceName) < 1 || len(input.DeviceName) > 80 || len(input.Reason) < 10 || len(input.Reason) > 500 || input.CashCountCents < 0 || actorID == uuid.Nil || requestID == "" {
+		return RecoveryCase{}, fmt.Errorf("%w: invalid recovery request", ErrInvalid)
+	}
+	return s.repository.ForceRecovery(ctx, input, actorID, requestID)
+}
+
+func (s *Service) ActiveRecovery(ctx context.Context) (*RecoveryDetails, error) {
+	return s.repository.GetActiveRecovery(ctx)
+}
+
+func (s *Service) AddRecoveryDifference(ctx context.Context, caseID uuid.UUID, input RecoveryDifferenceInput, actorID uuid.UUID, requestID string) (RecoveryDetails, error) {
+	input.Description = strings.TrimSpace(input.Description)
+	validKind := input.Kind == "unknown_sale_total" || input.Kind == "cash" || input.Kind == "digital_payment" || input.Kind == "inventory" || input.Kind == "sequence_gap"
+	if caseID == uuid.Nil || input.ID == uuid.Nil || !validKind || len(input.Description) < 3 || len(input.Description) > 500 || actorID == uuid.Nil || requestID == "" {
+		return RecoveryDetails{}, fmt.Errorf("%w: invalid recovery difference", ErrInvalid)
+	}
+	return s.repository.AddRecoveryDifference(ctx, caseID, input, actorID, requestID)
+}
+
+func (s *Service) UpdateRecoveryControls(ctx context.Context, caseID uuid.UUID, input RecoveryControlsInput, actorID uuid.UUID, requestID string) (RecoveryDetails, error) {
+	if caseID == uuid.Nil || actorID == uuid.Nil || requestID == "" || (input.JournalStatus != "imported" && input.JournalStatus != "unrecoverable") {
+		return RecoveryDetails{}, fmt.Errorf("%w: invalid recovery controls", ErrInvalid)
+	}
+	return s.repository.UpdateRecoveryControls(ctx, caseID, input, actorID, requestID)
+}
+
+func (s *Service) CloseRecovery(ctx context.Context, caseID, actorID uuid.UUID, requestID string) (RecoveryDetails, error) {
+	if caseID == uuid.Nil || actorID == uuid.Nil || requestID == "" {
+		return RecoveryDetails{}, fmt.Errorf("%w: invalid recovery closure", ErrInvalid)
+	}
+	return s.repository.CloseRecovery(ctx, caseID, actorID, requestID)
+}
+
+func (s *Service) ReconstructRecoverySale(ctx context.Context, caseID uuid.UUID, input RecoveryReconstructionInput, actorID uuid.UUID, requestID string) (Sale, error) {
+	input.Evidence = strings.TrimSpace(input.Evidence)
+	if caseID == uuid.Nil || input.ReconciliationOperationID == uuid.Nil || actorID == uuid.Nil || requestID == "" || (input.Certainty != "exact" && input.Certainty != "probable") || len(input.Evidence) < 3 || len(input.Evidence) > 500 {
+		return Sale{}, fmt.Errorf("%w: invalid recovery reconstruction", ErrInvalid)
+	}
+	input.Sale.OperationID = input.ReconciliationOperationID
+	input.Sale.recoveryCaseID = &caseID
+	sale, err := s.CreateSale(ctx, input.Sale, actorID, requestID)
+	if err != nil {
+		return Sale{}, err
+	}
+	if err := s.repository.RecordReconstruction(ctx, caseID, input, sale, actorID, requestID); err != nil {
+		return Sale{}, err
+	}
+	return sale, nil
+}
+
+func (s *Service) validateOfflineOperation(op OfflineOperation) (OfflineAuthorization, error) {
+	if op.OperationID == uuid.Nil || op.DeviceID == uuid.Nil || op.DeviceSessionID == uuid.Nil || op.FencingVersion <= 0 || op.Sequence <= 0 || op.CreatedAtLocal.IsZero() || len(op.Timezone) < 1 || len(op.Timezone) > 80 || !validHash(op.PayloadHash) || (op.PreviousHash != "" && !validHash(op.PreviousHash)) || len(op.Payload) == 0 {
+		return OfflineAuthorization{}, fmt.Errorf("%w: invalid operation envelope", ErrInvalid)
+	}
+	if (op.Timezone != "UTC" && !strings.Contains(op.Timezone, "/")) || op.CreatedAtLocal.After(s.now().UTC().Add(5*time.Minute)) {
+		return OfflineAuthorization{}, fmt.Errorf("%w: invalid local timestamp or timezone", ErrInvalid)
+	}
+	grant, err := s.decodeGrant(op.Authorization)
+	if err != nil {
+		return OfflineAuthorization{}, err
+	}
+	if grant.ExpiresAt.Before(op.CreatedAtLocal) || op.CreatedAtLocal.Before(grant.IssuedAt.Add(-5*time.Minute)) ||
+		grant.ExpiresAt.Before(grant.IssuedAt) || grant.ExpiresAt.After(grant.IssuedAt.Add(24*time.Hour+time.Minute)) ||
+		grant.DeviceID != op.DeviceID || grant.DeviceSessionID != op.DeviceSessionID || grant.FencingVersion != op.FencingVersion {
+		return OfflineAuthorization{}, ErrGrantInvalid
+	}
+	switch op.OperationType {
+	case "sale":
+		var payload CreateSaleInput
+		if err := strictDecode(op.Payload, &payload); err != nil || payload.OperationID != op.OperationID || payload.DeviceSessionID != op.DeviceSessionID || payload.FencingVersion != op.FencingVersion || payload.CatalogVersion != grant.CatalogVersion {
+			return OfflineAuthorization{}, ErrGrantInvalid
+		}
+		for _, payment := range payload.Payments {
+			if payment.Method != PaymentCash && payment.Status == PaymentConfirmed {
+				return OfflineAuthorization{}, fmt.Errorf("%w: offline digital payments can only be reported", ErrInvalid)
+			}
+		}
+	case "shift_close":
+		var payload OfflineCloseShiftInput
+		if err := strictDecode(op.Payload, &payload); err != nil || payload.CashShiftID != grant.CashShiftID {
+			return OfflineAuthorization{}, ErrGrantInvalid
+		}
+	case "shift_open":
+		var payload OfflineOpenShiftInput
+		if err := strictDecode(op.Payload, &payload); err != nil || payload.ID == uuid.Nil || payload.PreviousCashShiftID != grant.CashShiftID || payload.DeviceSessionID != op.DeviceSessionID || payload.FencingVersion != op.FencingVersion || payload.OpeningCashCents < 0 {
+			return OfflineAuthorization{}, ErrGrantInvalid
+		}
+	default:
+		return OfflineAuthorization{}, fmt.Errorf("%w: unsupported operation type", ErrInvalid)
+	}
+	hash, err := canonicalRawPayloadHash(op.Payload)
+	if err != nil || !hmac.Equal([]byte(hash), []byte(op.PayloadHash)) {
+		return OfflineAuthorization{}, fmt.Errorf("%w: payload hash does not match", ErrSyncConflict)
+	}
+	return grant, nil
+}
+
+func (s *Service) decodeGrant(token string) (OfflineAuthorization, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return OfflineAuthorization{}, ErrGrantInvalid
+	}
+	mac := hmac.New(sha256.New, s.signingKey)
+	_, _ = mac.Write([]byte(parts[0]))
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
+		return OfflineAuthorization{}, ErrGrantInvalid
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return OfflineAuthorization{}, ErrGrantInvalid
+	}
+	var grant OfflineAuthorization
+	if err := json.Unmarshal(body, &grant); err != nil || grant.UserID == uuid.Nil {
+		return OfflineAuthorization{}, ErrGrantInvalid
+	}
+	grant.Token = token
+	return grant, nil
+}
+
+func canonicalPayloadHash(payload CreateSaleInput) (string, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return canonicalRawPayloadHash(raw)
+}
+
+func canonicalRawPayloadHash(raw json.RawMessage) (string, error) {
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(generic)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func strictDecode(raw json.RawMessage, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(destination)
+}
+
+func validHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil && value == strings.ToLower(value)
 }
 
 func validatePayment(payment PaymentInput) error {

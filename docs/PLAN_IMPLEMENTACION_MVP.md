@@ -2,7 +2,7 @@
 
 - Versión: 2.1
 - Fecha: 2026-10-12
-- Estado: Fase 3 completada; listo para iniciar fase 4
+- Estado: Fase 4 en implementación; núcleo de venta offline y sync disponible
 
 ## Principios de ejecución
 
@@ -139,6 +139,9 @@ encuentra en `FASE_3_POS_CAJA_ONLINE.md`.
    conciliación requerida.
 8. Cierre y apertura offline del mismo dispositivo se consolidan en orden.
 9. Las pruebas se ejecutan en los navegadores/dispositivos reales elegidos.
+
+Estado: en implementación desde el 2026-10-12. El avance y los controles aún
+pendientes están documentados en `FASE_4_OFFLINE_DISPOSITIVOS_RECUPERACION.md`.
 
 ## Fase 5 — Inventario, compras, lotes y correcciones
 

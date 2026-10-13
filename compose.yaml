@@ -41,6 +41,7 @@ services:
       APP_ALLOWED_ORIGIN: ${APP_ALLOWED_ORIGIN:-http://localhost:5173}
       APP_COOKIE_SECURE: ${APP_COOKIE_SECURE:-false}
       APP_SESSION_TTL: ${APP_SESSION_TTL:-12h}
+      APP_OFFLINE_SIGNING_KEY: ${APP_OFFLINE_SIGNING_KEY:-development-only-change-this-key-32chars}
       DATABASE_URL: ${DATABASE_URL:-postgres://bakery:bakery_local_only@db:5432/bakery_pos?sslmode=disable}
     command:
       - /bin/sh

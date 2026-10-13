@@ -1,6 +1,7 @@
 package pos
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -16,6 +17,9 @@ var (
 	ErrNoActiveDevice    = errors.New("active pos device required")
 	ErrNoOpenShift       = errors.New("open cash shift required")
 	ErrPaymentIncomplete = errors.New("effective payments must equal sale total")
+	ErrSyncConflict      = errors.New("offline synchronization conflict")
+	ErrGrantInvalid      = errors.New("offline authorization is invalid or expired")
+	ErrRecoveryRequired  = errors.New("device recovery is required")
 )
 
 type DeviceSession struct {
@@ -138,14 +142,165 @@ type PaymentInput struct {
 }
 
 type CreateSaleInput struct {
+	OperationID      uuid.UUID       `json:"operation_id"`
+	DeviceSessionID  uuid.UUID       `json:"device_session_id"`
+	FencingVersion   int64           `json:"fencing_version"`
+	CashShiftID      uuid.UUID       `json:"cash_shift_id"`
+	ShiftVersion     int64           `json:"shift_version"`
+	CatalogVersion   int64           `json:"catalog_version"`
+	Items            []SaleItemInput `json:"items"`
+	Payments         []PaymentInput  `json:"payments"`
+	offlineCatalogAt *time.Time
+	offlineCreatedAt *time.Time
+	recoveryCaseID   *uuid.UUID
+}
+
+type OfflineAuthorizationRequest struct {
+	DeviceSessionID uuid.UUID `json:"device_session_id"`
+	FencingVersion  int64     `json:"fencing_version"`
+	CashShiftID     uuid.UUID `json:"cash_shift_id"`
+	ShiftVersion    int64     `json:"shift_version"`
+	CatalogVersion  int64     `json:"catalog_version"`
+}
+
+type OfflineAuthorization struct {
+	Token           string    `json:"token"`
+	UserID          uuid.UUID `json:"user_id"`
+	DeviceID        uuid.UUID `json:"device_id"`
+	DeviceSessionID uuid.UUID `json:"device_session_id"`
+	FencingVersion  int64     `json:"fencing_version"`
+	CashShiftID     uuid.UUID `json:"cash_shift_id"`
+	ShiftVersion    int64     `json:"shift_version"`
+	CatalogVersion  int64     `json:"catalog_version"`
+	IssuedAt        time.Time `json:"issued_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type OfflineOperation struct {
 	OperationID     uuid.UUID       `json:"operation_id"`
+	DeviceID        uuid.UUID       `json:"device_id"`
 	DeviceSessionID uuid.UUID       `json:"device_session_id"`
 	FencingVersion  int64           `json:"fencing_version"`
-	CashShiftID     uuid.UUID       `json:"cash_shift_id"`
-	ShiftVersion    int64           `json:"shift_version"`
-	CatalogVersion  int64           `json:"catalog_version"`
-	Items           []SaleItemInput `json:"items"`
-	Payments        []PaymentInput  `json:"payments"`
+	Sequence        int64           `json:"sequence"`
+	CreatedAtLocal  time.Time       `json:"created_at_local"`
+	Timezone        string          `json:"timezone"`
+	PreviousHash    string          `json:"previous_hash"`
+	PayloadHash     string          `json:"payload_hash"`
+	Authorization   string          `json:"authorization"`
+	OperationType   string          `json:"operation_type"`
+	Payload         json.RawMessage `json:"payload"`
+}
+
+type OfflineCloseShiftInput struct {
+	CashShiftID      uuid.UUID `json:"cash_shift_id"`
+	ExpectedVersion  int64     `json:"expected_version"`
+	CountedCashCents int64     `json:"counted_cash_cents"`
+	ClosingNote      string    `json:"closing_note"`
+}
+
+type OfflineOpenShiftInput struct {
+	ID                  uuid.UUID `json:"id"`
+	PreviousCashShiftID uuid.UUID `json:"previous_cash_shift_id"`
+	DeviceSessionID     uuid.UUID `json:"device_session_id"`
+	FencingVersion      int64     `json:"fencing_version"`
+	OpeningCashCents    int64     `json:"opening_cash_cents"`
+	OpeningNote         string    `json:"opening_note"`
+}
+
+type SyncBatchInput struct {
+	Operations []OfflineOperation `json:"operations"`
+}
+
+type SyncACK struct {
+	OperationID uuid.UUID  `json:"operation_id"`
+	Sequence    int64      `json:"sequence"`
+	PayloadHash string     `json:"payload_hash"`
+	Status      string     `json:"status"`
+	SaleID      *uuid.UUID `json:"sale_id,omitempty"`
+	ShiftID     *uuid.UUID `json:"shift_id,omitempty"`
+	Replayed    bool       `json:"replayed"`
+}
+
+type SyncBatchResult struct {
+	ACKs []SyncACK `json:"acks"`
+}
+
+type SyncStatus struct {
+	DeviceSessionID uuid.UUID  `json:"device_session_id"`
+	LastSequence    int64      `json:"last_sequence"`
+	LastHash        string     `json:"last_hash"`
+	RecoveryCaseID  *uuid.UUID `json:"recovery_case_id,omitempty"`
+}
+
+type SyncReservation struct {
+	ACK      *SyncACK
+	Evidence bool
+}
+
+type ForceRecoveryInput struct {
+	PreviousSessionID uuid.UUID `json:"previous_session_id"`
+	DeviceID          uuid.UUID `json:"device_id"`
+	DeviceName        string    `json:"device_name"`
+	Reason            string    `json:"reason"`
+	CashCountCents    int64     `json:"cash_count_cents"`
+}
+
+type RecoveryDifferenceInput struct {
+	ID          uuid.UUID `json:"id"`
+	Kind        string    `json:"kind"`
+	AmountCents *int64    `json:"amount_cents,omitempty"`
+	Description string    `json:"description"`
+}
+
+type RecoveryControlsInput struct {
+	JournalStatus           string `json:"journal_status"`
+	GapsDocumented          bool   `json:"gaps_documented"`
+	DigitalPaymentsReviewed bool   `json:"digital_payments_reviewed"`
+	InventoryCounted        bool   `json:"inventory_counted"`
+	OwnerApproved           bool   `json:"owner_approved"`
+}
+
+type RecoveryDifference struct {
+	ID          uuid.UUID  `json:"id"`
+	Kind        string     `json:"kind"`
+	AmountCents *int64     `json:"amount_cents,omitempty"`
+	Description string     `json:"description"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+}
+
+type RecoveryDetails struct {
+	RecoveryCase
+	JournalStatus           string               `json:"journal_status"`
+	GapsDocumented          bool                 `json:"gaps_documented"`
+	DigitalPaymentsReviewed bool                 `json:"digital_payments_reviewed"`
+	InventoryCounted        bool                 `json:"inventory_counted"`
+	OwnerApproved           bool                 `json:"owner_approved"`
+	Differences             []RecoveryDifference `json:"differences"`
+}
+
+type RecoveryReconstructionInput struct {
+	ReconciliationOperationID uuid.UUID       `json:"reconciliation_operation_id"`
+	SourceOperationID         *uuid.UUID      `json:"source_operation_id,omitempty"`
+	Certainty                 string          `json:"certainty"`
+	Evidence                  string          `json:"evidence"`
+	Sale                      CreateSaleInput `json:"sale"`
+}
+
+type RecoveryCase struct {
+	ID                     uuid.UUID     `json:"id"`
+	PreviousSessionID      uuid.UUID     `json:"previous_session_id"`
+	ReplacementSessionID   uuid.UUID     `json:"replacement_session_id"`
+	AffectedShiftID        *uuid.UUID    `json:"affected_shift_id,omitempty"`
+	Status                 string        `json:"status"`
+	Reason                 string        `json:"reason"`
+	LastACKSequence        int64         `json:"last_ack_sequence"`
+	LastACKHash            string        `json:"last_ack_hash"`
+	CashCountCents         int64         `json:"cash_count_cents"`
+	OpenedAt               time.Time     `json:"opened_at"`
+	PreviousFencingVersion int64         `json:"previous_fencing_version"`
+	AffectedShiftVersion   int64         `json:"affected_shift_version"`
+	ReplacementSession     DeviceSession `json:"replacement_session"`
 }
 
 type SaleItem struct {

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Bakery POS">
+  <rect width="512" height="512" rx="112" fill="#b83b2f"/>
+  <path d="M118 278c0-91 57-164 138-164s138 73 138 164v88H118z" fill="#fff4d9"/>
+  <path d="M176 269c13-49 40-82 80-99m0 0c40 17 67 50 80 99M256 170v196" fill="none" stroke="#b83b2f" stroke-width="28" stroke-linecap="round"/>
+  <path d="M96 366h320" stroke="#4c2b22" stroke-width="28" stroke-linecap="round"/>
+</svg>

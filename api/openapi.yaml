@@ -433,6 +433,163 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Sale" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /pos/offline-authorizations:
+    post:
+      summary: Preparar el dispositivo activo para ventas offline durante 24 horas
+      operationId: issueOfflineAuthorization
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfflineAuthorizationRequest" }
+      responses:
+        "201":
+          description: Autorización firmada y acotada al usuario, dispositivo, turno y catálogo.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OfflineAuthorization" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /sync/operations:
+    post:
+      summary: Sincronizar el diario POS en orden
+      operationId: syncOperations
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SyncBatchRequest" }
+      responses:
+        "200":
+          description: ACK durable por operación; el lote se detiene ante evidencia de recuperación.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncBatchResult" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /sync/status:
+    get:
+      summary: Consultar continuidad reconocida del diario
+      operationId: getSyncStatus
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { name: device_session_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Último ACK conocido por el servidor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncStatus" }
+  /pos/recovery/force:
+    post:
+      summary: Cercar el dispositivo anterior y abrir recuperación conciliable
+      operationId: forcePOSRecovery
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForceRecoveryRequest" }
+      responses:
+        "201":
+          description: Caso abierto y dispositivo de reemplazo adquirido.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCase" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /pos/recovery/current:
+    get:
+      summary: Obtener la conciliación activa
+      operationId: getActivePOSRecovery
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Caso activo o null.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recovery]
+                properties:
+                  recovery:
+                    oneOf:
+                      - { $ref: "#/components/schemas/RecoveryDetails" }
+                      - { type: "null" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /pos/recovery/{id}/differences:
+    post:
+      summary: Documentar una diferencia de conciliación
+      operationId: addRecoveryDifference
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/RecoveryCaseID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryDifferenceRequest" }
+      responses:
+        "201":
+          description: Conciliación actualizada.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryDetails" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /pos/recovery/{id}/controls:
+    put:
+      summary: Guardar controles de conciliación
+      operationId: updateRecoveryControls
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/RecoveryCaseID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryControlsRequest" }
+      responses:
+        "200":
+          description: Controles guardados.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryDetails" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /pos/recovery/{id}/reconstructions:
+    post:
+      summary: Reconstruir una venta conocida dentro de una conciliación
+      operationId: reconstructRecoverySale
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/RecoveryCaseID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryReconstructionRequest" }
+      responses:
+        "201":
+          description: Venta reconstruida idempotentemente.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Sale" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /pos/recovery/{id}/close:
+    post:
+      summary: Resolver la conciliación después de completar todos los controles
+      operationId: closePOSRecovery
+      security: [{ sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/RecoveryCaseID" }]
+      responses:
+        "200":
+          description: Conciliación resuelta.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryDetails" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /inventory/balances:
     get:
       summary: Listar saldos de inventario
@@ -484,6 +641,11 @@ components:
       name: bakery_pos_session
   parameters:
     ProductID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RecoveryCaseID:
       name: id
       in: path
       required: true
@@ -780,6 +942,185 @@ components:
           minItems: 1
           maxItems: 10
           items: { $ref: "#/components/schemas/SalePaymentRequest" }
+    OfflineAuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [device_session_id, fencing_version, cash_shift_id, shift_version, catalog_version]
+      properties:
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        cash_shift_id: { type: string, format: uuid }
+        shift_version: { type: integer, format: int64, minimum: 1 }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+    OfflineAuthorization:
+      type: object
+      required: [token, user_id, device_id, device_session_id, fencing_version, cash_shift_id, shift_version, catalog_version, issued_at, expires_at]
+      properties:
+        token: { type: string }
+        user_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64 }
+        cash_shift_id: { type: string, format: uuid }
+        shift_version: { type: integer, format: int64 }
+        catalog_version: { type: integer, format: int64 }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    OfflineOperation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, operation_type, device_id, device_session_id, fencing_version, sequence, created_at_local, timezone, previous_hash, payload_hash, authorization, payload]
+      properties:
+        operation_id: { type: string, format: uuid }
+        operation_type: { type: string, enum: [sale, shift_close, shift_open] }
+        device_id: { type: string, format: uuid }
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        sequence: { type: integer, format: int64, minimum: 1 }
+        created_at_local: { type: string, format: date-time }
+        timezone: { type: string, minLength: 1, maxLength: 80 }
+        previous_hash: { type: string, pattern: "^(?:|[0-9a-f]{64})$" }
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        authorization: { type: string }
+        payload:
+          oneOf:
+            - { $ref: "#/components/schemas/CreateSaleRequest" }
+            - { $ref: "#/components/schemas/OfflineCloseShiftRequest" }
+            - { $ref: "#/components/schemas/OfflineOpenShiftRequest" }
+    OfflineCloseShiftRequest:
+      type: object
+      additionalProperties: false
+      required: [cash_shift_id, expected_version, counted_cash_cents, closing_note]
+      properties:
+        cash_shift_id: { type: string, format: uuid }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        counted_cash_cents: { type: integer, format: int64, minimum: 0 }
+        closing_note: { type: string, maxLength: 500 }
+    OfflineOpenShiftRequest:
+      type: object
+      additionalProperties: false
+      required: [id, previous_cash_shift_id, device_session_id, fencing_version, opening_cash_cents, opening_note]
+      properties:
+        id: { type: string, format: uuid }
+        previous_cash_shift_id: { type: string, format: uuid }
+        device_session_id: { type: string, format: uuid }
+        fencing_version: { type: integer, format: int64, minimum: 1 }
+        opening_cash_cents: { type: integer, format: int64, minimum: 0 }
+        opening_note: { type: string, maxLength: 500 }
+    SyncBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: "#/components/schemas/OfflineOperation" }
+    SyncACK:
+      type: object
+      required: [operation_id, sequence, payload_hash, status, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        sequence: { type: integer, format: int64 }
+        payload_hash: { type: string }
+        status: { type: string, enum: [acknowledged, recovery_evidence] }
+        sale_id: { type: string, format: uuid }
+        shift_id: { type: string, format: uuid }
+        replayed: { type: boolean }
+    SyncBatchResult:
+      type: object
+      required: [acks]
+      properties:
+        acks:
+          type: array
+          items: { $ref: "#/components/schemas/SyncACK" }
+    SyncStatus:
+      type: object
+      required: [device_session_id, last_sequence, last_hash]
+      properties:
+        device_session_id: { type: string, format: uuid }
+        last_sequence: { type: integer, format: int64, minimum: 0 }
+        last_hash: { type: string }
+        recovery_case_id: { type: string, format: uuid }
+    ForceRecoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [previous_session_id, device_id, device_name, reason, cash_count_cents]
+      properties:
+        previous_session_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+        reason: { type: string, minLength: 10, maxLength: 500 }
+        cash_count_cents: { type: integer, format: int64, minimum: 0 }
+    RecoveryCase:
+      type: object
+      required: [id, previous_session_id, replacement_session_id, status, reason, last_ack_sequence, last_ack_hash, cash_count_cents, opened_at, previous_fencing_version, affected_shift_version, replacement_session]
+      properties:
+        id: { type: string, format: uuid }
+        previous_session_id: { type: string, format: uuid }
+        replacement_session_id: { type: string, format: uuid }
+        affected_shift_id: { type: string, format: uuid }
+        status: { type: string, enum: [open, resolved] }
+        reason: { type: string }
+        last_ack_sequence: { type: integer, format: int64 }
+        last_ack_hash: { type: string }
+        cash_count_cents: { type: integer, format: int64 }
+        opened_at: { type: string, format: date-time }
+        previous_fencing_version: { type: integer, format: int64, minimum: 1 }
+        affected_shift_version: { type: integer, format: int64, minimum: 0 }
+        replacement_session: { $ref: "#/components/schemas/DeviceSession" }
+    RecoveryDifferenceRequest:
+      type: object
+      additionalProperties: false
+      required: [id, kind, description]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [unknown_sale_total, cash, digital_payment, inventory, sequence_gap] }
+        amount_cents: { type: integer, format: int64 }
+        description: { type: string, minLength: 3, maxLength: 500 }
+    RecoveryDifference:
+      allOf:
+        - { $ref: "#/components/schemas/RecoveryDifferenceRequest" }
+        - type: object
+          required: [created_at]
+          properties:
+            created_at: { type: string, format: date-time }
+            resolved_at: { type: string, format: date-time }
+    RecoveryControlsRequest:
+      type: object
+      additionalProperties: false
+      required: [journal_status, gaps_documented, digital_payments_reviewed, inventory_counted, owner_approved]
+      properties:
+        journal_status: { type: string, enum: [imported, unrecoverable] }
+        gaps_documented: { type: boolean }
+        digital_payments_reviewed: { type: boolean }
+        inventory_counted: { type: boolean }
+        owner_approved: { type: boolean }
+    RecoveryDetails:
+      allOf:
+        - { $ref: "#/components/schemas/RecoveryCase" }
+        - type: object
+          required: [journal_status, gaps_documented, digital_payments_reviewed, inventory_counted, owner_approved, differences]
+          properties:
+            journal_status: { type: string, enum: [pending, imported, unrecoverable] }
+            gaps_documented: { type: boolean }
+            digital_payments_reviewed: { type: boolean }
+            inventory_counted: { type: boolean }
+            owner_approved: { type: boolean }
+            differences:
+              type: array
+              items: { $ref: "#/components/schemas/RecoveryDifference" }
+    RecoveryReconstructionRequest:
+      type: object
+      additionalProperties: false
+      required: [reconciliation_operation_id, certainty, evidence, sale]
+      properties:
+        reconciliation_operation_id: { type: string, format: uuid }
+        source_operation_id: { type: string, format: uuid }
+        certainty: { type: string, enum: [exact, probable] }
+        evidence: { type: string, minLength: 3, maxLength: 500 }
+        sale: { $ref: "#/components/schemas/CreateSaleRequest" }
     SaleItem:
       type: object
       required: [id, line_number, product_id, product_name, sale_mode, base_unit, quantity, unit_price_cents, price_unit, subtotal_cents, catalog_version]

@@ -171,6 +171,93 @@ export interface SaleInput {
   }>
 }
 
+export interface OfflineAuthorization {
+  token: string
+  user_id: string
+  device_id: string
+  device_session_id: string
+  fencing_version: number
+  cash_shift_id: string
+  shift_version: number
+  catalog_version: number
+  issued_at: string
+  expires_at: string
+}
+
+export interface OfflineCloseShiftInput {
+  cash_shift_id: string
+  expected_version: number
+  counted_cash_cents: number
+  closing_note: string
+}
+
+export interface OfflineOpenShiftInput {
+  id: string
+  previous_cash_shift_id: string
+  device_session_id: string
+  fencing_version: number
+  opening_cash_cents: number
+  opening_note: string
+}
+
+export type OfflinePayload = SaleInput | OfflineCloseShiftInput | OfflineOpenShiftInput
+
+export interface OfflineOperation {
+  operation_id: string
+  operation_type: 'sale' | 'shift_close' | 'shift_open'
+  device_id: string
+  device_session_id: string
+  fencing_version: number
+  sequence: number
+  created_at_local: string
+  timezone: string
+  previous_hash: string
+  payload_hash: string
+  authorization: string
+  payload: OfflinePayload
+}
+
+export interface SyncACK {
+  operation_id: string
+  sequence: number
+  payload_hash: string
+  status: 'acknowledged' | 'recovery_evidence'
+  sale_id?: string
+  shift_id?: string
+  replayed: boolean
+}
+
+export interface RecoveryDifference {
+  id: string
+  kind: 'unknown_sale_total' | 'cash' | 'digital_payment' | 'inventory' | 'sequence_gap'
+  amount_cents?: number
+  description: string
+  created_at: string
+  resolved_at?: string
+}
+
+export interface RecoveryDetails {
+  id: string
+  previous_session_id: string
+  replacement_session_id: string
+  affected_shift_id?: string
+  status: 'open' | 'resolved'
+  reason: string
+  last_ack_sequence: number
+  last_ack_hash: string
+  cash_count_cents: number
+  opened_at: string
+  previous_fencing_version: number
+  affected_shift_version: number
+  replacement_session: DeviceSession
+  journal_status: 'pending' | 'imported' | 'unrecoverable'
+  gaps_documented: boolean
+  digital_payments_reviewed: boolean
+  inventory_counted: boolean
+  owner_approved: boolean
+  differences: RecoveryDifference[]
+}
+
 export interface Sale {
   id: string
   cash_shift_id: string
@@ -415,6 +502,77 @@ export async function closeCashShift(shiftID: string, input: {
 
 export async function createSale(input: SaleInput): Promise<Sale> {
   return request<Sale>('/api/v1/sales', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function getSale(id: string): Promise<Sale> {
+  return request<Sale>(`/api/v1/sales/${id}`)
+}
+
+export async function issueOfflineAuthorization(input: {
+  device_session_id: string
+  fencing_version: number
+  cash_shift_id: string
+  shift_version: number
+  catalog_version: number
+}): Promise<OfflineAuthorization> {
+  return request<OfflineAuthorization>('/api/v1/pos/offline-authorizations', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function syncOfflineOperations(operations: OfflineOperation[]): Promise<{ acks: SyncACK[] }> {
+  return request<{ acks: SyncACK[] }>('/api/v1/sync/operations', {
+    method: 'POST',
+    body: JSON.stringify({ operations }),
+  })
+}
+
+export async function getActiveRecovery(): Promise<RecoveryDetails | null> {
+  return (await request<{ recovery: RecoveryDetails | null }>('/api/v1/pos/recovery/current')).recovery
+}
+
+export async function forcePOSRecovery(input: {
+  previous_session_id: string
+  device_id: string
+  device_name: string
+  reason: string
+  cash_count_cents: number
+}): Promise<unknown> {
+  return request('/api/v1/pos/recovery/force', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function addRecoveryDifference(caseID: string, input: {
+  id: string
+  kind: RecoveryDifference['kind']
+  amount_cents?: number
+  description: string
+}): Promise<RecoveryDetails> {
+  return request<RecoveryDetails>(`/api/v1/pos/recovery/${caseID}/differences`, { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function updateRecoveryControls(caseID: string, input: {
+  journal_status: RecoveryDetails['journal_status']
+  gaps_documented: boolean
+  digital_payments_reviewed: boolean
+  inventory_counted: boolean
+  owner_approved: boolean
+}): Promise<RecoveryDetails> {
+  return request<RecoveryDetails>(`/api/v1/pos/recovery/${caseID}/controls`, { method: 'PUT', body: JSON.stringify(input) })
+}
+
+export async function closeRecovery(caseID: string): Promise<RecoveryDetails> {
+  return request<RecoveryDetails>(`/api/v1/pos/recovery/${caseID}/close`, { method: 'POST' })
+}
+
+export async function reconstructRecoverySale(caseID: string, input: {
+  reconciliation_operation_id: string
+  source_operation_id?: string
+  certainty: 'exact' | 'probable'
+  evidence: string
+  sale: SaleInput
+}): Promise<Sale> {
+  return request<Sale>(`/api/v1/pos/recovery/${caseID}/reconstructions`, { method: 'POST', body: JSON.stringify(input) })
 }
 
 export async function listSales(): Promise<Page<Sale>> {

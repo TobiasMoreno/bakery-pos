@@ -5,10 +5,11 @@ Go, React, TypeScript y PostgreSQL.
 
 ## Estado
 
-Fase 3 implementada: fundaciones locales, autenticación, catálogo, precios,
-libro mínimo de inventario, POS por unidad/peso, pagos combinados, turno de caja,
-historial e incidencias por stock negativo. El protocolo offline y los flujos
-completos de inventario se incorporan en las próximas fases.
+Fase 4 en implementación: además del POS online se incorporaron PWA instalable,
+intents de cobro y diario durable en IndexedDB, autorización offline de 24 horas,
+cola ordenada con hashes y ACK idempotente, y apertura de recuperación forzada.
+El cierre/apertura de turnos offline y la conciliación final asistida siguen
+pendientes antes de declarar cerrada la fase.
 
 ## Requisitos
 
@@ -51,6 +52,7 @@ Las credenciales se pueden reemplazar mediante las variables `DEMO_*` de
 - [Evidencia de fase 1](./docs/FASE_1_FUNDACIONES.md)
 - [Evidencia de fase 2](./docs/FASE_2_CATALOGO_E_INVENTARIO.md)
 - [Evidencia de fase 3](./docs/FASE_3_POS_CAJA_ONLINE.md)
+- [Avance de fase 4](./docs/FASE_4_OFFLINE_DISPOSITIVOS_RECUPERACION.md)
 - [ADRs](./docs/adr/README.md)
 - [Plan de implementación](./docs/PLAN_IMPLEMENTACION_MVP.md)
 

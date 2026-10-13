@@ -2,10 +2,18 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { APIError, getCurrentUser, login, logout, type User } from './api'
 import CatalogDashboard from './CatalogDashboard'
 import POSDashboard from './POSDashboard'
+import {
+  clearOfflineUnlock,
+  configureOfflineUnlock,
+  getOfflineUnlockUser,
+  initializeOfflineStorage,
+  verifyOfflineUnlock,
+} from './offline'
 
 type SessionState =
   | { status: 'loading' }
   | { status: 'anonymous' }
+  | { status: 'offline-locked'; user: User }
   | { status: 'authenticated'; user: User }
 
 function App() {
@@ -15,15 +23,16 @@ function App() {
 
   useEffect(() => {
     let active = true
-    getCurrentUser()
+    initializeOfflineStorage().then(getCurrentUser)
       .then((user) => {
         if (!active) return
         setSession(user ? { status: 'authenticated', user } : { status: 'anonymous' })
       })
-      .catch(() => {
+      .catch(async () => {
         if (!active) return
         setConnectionError(true)
-        setSession({ status: 'anonymous' })
+        const user = await getOfflineUnlockUser().catch(() => null)
+        if (active) setSession(user ? { status: 'offline-locked', user } : { status: 'anonymous' })
       })
     return () => {
       active = false
@@ -31,6 +40,9 @@ function App() {
   }, [])
 
   if (session.status === 'loading') return <LoadingScreen />
+  if (session.status === 'offline-locked') {
+    return <OfflineUnlockScreen expectedUser={session.user} onUnlocked={(user) => setSession({ status: 'authenticated', user })} />
+  }
   if (session.status === 'anonymous') {
     return (
       <LoginScreen
@@ -43,9 +55,13 @@ function App() {
     )
   }
   const handleLogout = async () => {
-    await logout()
-    setSession({ status: 'anonymous' })
-    setWorkspace('pos')
+    try {
+      if (navigator.onLine) await logout()
+    } finally {
+      await clearOfflineUnlock()
+      setSession({ status: 'anonymous' })
+      setWorkspace('pos')
+    }
   }
   if (workspace === 'catalog') return (
     <CatalogDashboard
@@ -84,7 +100,10 @@ function LoginScreen({ connectionError, onAuthenticated }: LoginScreenProps) {
     setSubmitting(true)
     setError(null)
     void login(username, password)
-      .then(onAuthenticated)
+      .then(async (user) => {
+        if (typeof indexedDB !== 'undefined') await configureOfflineUnlock(user, password)
+        onAuthenticated(user)
+      })
       .catch((caught: unknown) => {
         setError(caught instanceof APIError ? caught.message : 'No pudimos conectar con la caja.')
       })
@@ -99,7 +118,7 @@ function LoginScreen({ connectionError, onAuthenticated }: LoginScreenProps) {
           <span>Bakery POS</span>
         </div>
         <div className="story-copy">
-          <p className="eyebrow">Ventas y caja · fase 3</p>
+          <p className="eyebrow">Ventas y caja resiliente · fase 4</p>
           <h1 id="welcome-title">El mostrador, listo para vender.</h1>
           <p>
             Una caja táctil, auditable y pensada para el ritmo real del mostrador.
@@ -159,6 +178,39 @@ function LoginScreen({ connectionError, onAuthenticated }: LoginScreenProps) {
             {submitting ? 'Verificando…' : 'Entrar al mostrador'}
           </button>
           <p className="form-footnote">El acceso queda registrado para auditoría.</p>
+        </form>
+      </section>
+    </main>
+  )
+}
+
+function OfflineUnlockScreen({ expectedUser, onUnlocked }: { expectedUser: User; onUnlocked: (user: User) => void }) {
+  const [secret, setSecret] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSubmitting(true); setError(null)
+    void verifyOfflineUnlock(secret).then((user) => {
+      if (!user || user.id !== expectedUser.id) throw new Error('La clave local no coincide.')
+      onUnlocked(user)
+    }).catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'No se pudo desbloquear el puesto.'))
+      .finally(() => setSubmitting(false))
+  }
+
+  return (
+    <main className="auth-layout offline-unlock-layout">
+      <section className="auth-story" aria-labelledby="offline-title">
+        <div className="brand-line"><span className="brand-mark">BP</span><span>Bakery POS</span></div>
+        <div className="story-copy"><p className="eyebrow">Acceso local protegido</p><h1 id="offline-title">El puesto sigue operativo.</h1><p>La API no responde. Desbloqueá el diario cifrado con la misma clave usada en el último acceso online.</p></div>
+      </section>
+      <section className="auth-panel">
+        <form className="login-card" onSubmit={submit}>
+          <header><p className="eyebrow">Modo sin conexión</p><h2>{expectedUser.name}</h2><p>La autorización offline tiene vigencia limitada y queda ligada a este dispositivo.</p></header>
+          {error && <div className="notice notice-error" role="alert">{error}</div>}
+          <label><span>Contraseña o PIN</span><input type="password" autoComplete="current-password" value={secret} onChange={(event) => setSecret(event.target.value)} minLength={8} required autoFocus /></label>
+          <button className="primary-button" disabled={submitting}>{submitting ? 'Verificando localmente…' : 'Desbloquear mostrador'}</button>
         </form>
       </section>
     </main>
