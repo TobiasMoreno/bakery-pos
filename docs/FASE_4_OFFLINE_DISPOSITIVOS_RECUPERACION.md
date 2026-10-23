@@ -1,6 +1,6 @@
 # Avance de fase 4 — Offline, dispositivos y recuperación
 
-- Fecha: 2026-10-12
+- Fecha: 2026-10-15
 - Estado: en implementación; no cerrada
 
 ## Entregado
@@ -23,19 +23,36 @@
   su último ACK, abre el caso y adquiere el dispositivo de reemplazo.
 - Una operación del dispositivo cercado se guarda como evidencia y no aplica
   efectos de venta.
+- Las diferencias de recuperación tienen resolución explícita y auditada; el
+  cierre final se rechaza mientras exista alguna diferencia abierta.
+- La reconstrucción manual reserva el vínculo con la operación original antes
+  de aplicar la venta. Venta, pagos, caja, inventario, incidencias, auditoría y
+  vínculo se confirman o revierten en una sola transacción serializable.
+- Reintentos y solicitudes concurrentes no duplican efectos; cuando reaparece
+  el `source_operation_id`, su ACK referencia la venta ya reconstruida.
+- Cierre provisional y apertura del turno siguiente en el mismo dispositivo:
+  operación, secuencia, hash, evento de turno y contexto preparado se confirman
+  en una única transacción IndexedDB; el servidor los consolida en orden y
+  devuelve ACK idempotente.
 - Contrato OpenAPI, migración append-only y pruebas unitarias del envelope.
 
 ## Pendiente para cerrar la fase
 
-1. Modelar cierre provisional y apertura offline como operaciones del mismo
-   diario, y consolidarlas en secuencia.
-2. Completar la UI y endpoints de conciliación: reconstrucción manual, vínculo
-   inequívoco con el original, diferencias sin detalle y aprobación final.
-3. Incorporar desbloqueo local seguro al reabrir la PWA sin conectividad.
-4. Ejecutar OFF-00 a OFF-06, REC-03 a REC-08 y CASH-01 en los navegadores y
+1. Validar y endurecer el desbloqueo local seguro al reabrir la PWA sin
+   conectividad.
+2. Ejecutar OFF-00 a OFF-06, REC-03 a REC-08 y CASH-01 en los navegadores y
    dispositivos reales elegidos; registrar la matriz de resultados.
 
 Hasta completar esos puntos, esta evidencia no declara la fase terminada.
+
+## Verificación ejecutada el 2026-10-15
+
+- Suite backend y `go vet` completos.
+- Suite frontend completa, lint, type-check y build de producción.
+- Migraciones `00001` a `00009` sobre PostgreSQL de pruebas vacío.
+- Suite de integración completa contra PostgreSQL real, incluido CASH-01,
+  reconstrucción concurrente y atómica, reintento idempotente y bloqueo del
+  cierre con diferencias abiertas.
 
 ## Verificación reproducible
 

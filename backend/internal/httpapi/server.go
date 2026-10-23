@@ -122,6 +122,7 @@ func (s *Server) Routes() http.Handler {
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Post("/pos/recovery/force", s.forcePOSRecovery)
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Get("/pos/recovery/current", s.currentPOSRecovery)
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Post("/pos/recovery/{id}/differences", s.addRecoveryDifference)
+				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Post("/pos/recovery/{id}/differences/{difference_id}/resolve", s.resolveRecoveryDifference)
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Put("/pos/recovery/{id}/controls", s.updateRecoveryControls)
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Post("/pos/recovery/{id}/reconstructions", s.reconstructRecoverySale)
 				protected.With(RequirePermission(auth.PermissionRecoveryForce)).Post("/pos/recovery/{id}/close", s.closePOSRecovery)

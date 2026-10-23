@@ -247,30 +247,94 @@ func TestSaleCommitsCashInventoryIncidentAuditAndIdempotency(t *testing.T) {
 	if err != nil || recovery.AffectedShiftID == nil || recovery.AffectedShiftVersion != 2 {
 		t.Fatalf("force recovery = %#v, error = %v", recovery, err)
 	}
+	differenceID := uuid.New()
 	details, err := service.AddRecoveryDifference(ctx, recovery.ID, RecoveryDifferenceInput{
-		ID: uuid.New(), Kind: "sequence_gap", Description: "Se documentó el tramo posterior al último ACK.",
+		ID: differenceID, Kind: "sequence_gap", Description: "Se documentó el tramo posterior al último ACK.",
 	}, actorID, "request-recovery-difference")
 	if err != nil || len(details.Differences) != 1 {
 		t.Fatalf("recovery differences = %#v, error = %v", details, err)
 	}
+	_, err = service.UpdateRecoveryControls(ctx, recovery.ID, RecoveryControlsInput{
+		JournalStatus: "imported", GapsDocumented: true, DigitalPaymentsReviewed: true, InventoryCounted: true, OwnerApproved: true,
+	}, actorID, "request-recovery-controls-before-resolution")
+	if err != nil {
+		t.Fatalf("prepare recovery controls: %v", err)
+	}
+	if _, err = service.CloseRecovery(ctx, recovery.ID, actorID, "request-premature-recovery-close"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("close recovery with open difference error = %v, want ErrConflict", err)
+	}
+	details, err = service.ResolveRecoveryDifference(ctx, recovery.ID, differenceID, actorID, "request-resolve-recovery-difference")
+	if err != nil || details.Differences[0].ResolvedAt == nil {
+		t.Fatalf("resolved recovery difference = %#v, error = %v", details, err)
+	}
 	sourceOperationID := uuid.New()
 	reconstructionID := uuid.New()
-	reconstructed, err := service.ReconstructRecoverySale(ctx, recovery.ID, RecoveryReconstructionInput{
+	reconstructionInput := RecoveryReconstructionInput{
 		ReconciliationOperationID: reconstructionID, SourceOperationID: &sourceOperationID, Certainty: "exact", Evidence: "Comprobante físico conservado",
 		Sale: CreateSaleInput{
 			DeviceSessionID: device.ID, FencingVersion: device.FencingVersion, CashShiftID: newShiftID,
 			ShiftVersion: recovery.AffectedShiftVersion, CatalogVersion: catalogVersion,
-			Items: []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
+			Items:    []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
 			Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 95000, Status: PaymentConfirmed, ReceivedCents: int64Pointer(95000)}},
 		},
-	}, actorID, "request-reconstruct-sale")
-	if err != nil || reconstructed.ID != reconstructionID {
-		t.Fatalf("reconstructed sale = %#v, error = %v", reconstructed, err)
+	}
+	type reconstructionResult struct {
+		sale Sale
+		err  error
+	}
+	concurrentResults := make(chan reconstructionResult, 2)
+	startReconstruction := make(chan struct{})
+	for _, concurrentRequestID := range []string{"request-reconstruct-sale-a", "request-reconstruct-sale-b"} {
+		go func(requestID string) {
+			<-startReconstruction
+			sale, err := service.ReconstructRecoverySale(ctx, recovery.ID, reconstructionInput, actorID, requestID)
+			concurrentResults <- reconstructionResult{sale: sale, err: err}
+		}(concurrentRequestID)
+	}
+	close(startReconstruction)
+	var reconstructed Sale
+	for range 2 {
+		result := <-concurrentResults
+		if result.err == nil {
+			if result.sale.ID != reconstructionID {
+				t.Fatalf("concurrent reconstructed sale = %#v", result.sale)
+			}
+			reconstructed = result.sale
+		} else if !errors.Is(result.err, ErrConflict) {
+			t.Fatalf("concurrent reconstruction error = %v, want nil or ErrConflict", result.err)
+		}
+	}
+	if reconstructed.ID != reconstructionID {
+		t.Fatal("expected one concurrent reconstruction to succeed")
+	}
+	replayedReconstruction, err := service.ReconstructRecoverySale(ctx, recovery.ID, reconstructionInput, actorID, "request-reconstruct-sale-retry")
+	if err != nil || !replayedReconstruction.Replayed || replayedReconstruction.ID != reconstructed.ID {
+		t.Fatalf("replayed reconstruction = %#v, error = %v", replayedReconstruction, err)
+	}
+	failedReconstructionID := uuid.New()
+	failedSourceID := uuid.New()
+	failedReconstruction := reconstructionInput
+	failedReconstruction.ReconciliationOperationID = failedReconstructionID
+	failedReconstruction.SourceOperationID = &failedSourceID
+	failedReconstruction.Sale.ShiftVersion = reconstructed.CashShiftVersion
+	failedReconstruction.Sale.Payments = []PaymentInput{{Method: PaymentCash, AmountCents: 94000, Status: PaymentConfirmed, ReceivedCents: int64Pointer(94000)}}
+	if _, err := service.ReconstructRecoverySale(ctx, recovery.ID, failedReconstruction, actorID, "request-failed-reconstruction"); !errors.Is(err, ErrPaymentIncomplete) {
+		t.Fatalf("failed reconstruction error = %v, want ErrPaymentIncomplete", err)
+	}
+	for table, id := range map[string]uuid.UUID{"sales": failedReconstructionID, "recovery_reconstructions": failedReconstructionID} {
+		column := "id"
+		if table == "recovery_reconstructions" {
+			column = "reconciliation_operation_id"
+		}
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE `+column+`=$1`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("atomic reconstruction rollback %s count = %d, error = %v", table, count, err)
+		}
 	}
 	evidencePayload := CreateSaleInput{
 		OperationID: sourceOperationID, DeviceSessionID: device.ID, FencingVersion: device.FencingVersion,
 		CashShiftID: newShiftID, ShiftVersion: recovery.AffectedShiftVersion + 1, CatalogVersion: catalogVersion,
-		Items: []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
+		Items:    []SaleItemInput{{ProductID: productID, Quantity: mixedQuantity}},
 		Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 95000, Status: PaymentConfirmed, ReceivedCents: int64Pointer(95000)}},
 	}
 	evidenceJSON, _ := json.Marshal(evidencePayload)

@@ -49,11 +49,33 @@ func (r *PostgresRepository) ReserveSyncOperation(ctx context.Context, op Offlin
 	var storedFencingVersion int64
 	var resultSaleID *uuid.UUID
 	var resultShiftID *uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT payload_hash, previous_hash, sequence, device_id, device_session_id, fencing_version, status, result_sale_id, result_shift_id FROM sync_operations WHERE operation_id = $1`, op.OperationID).
+	err = tx.QueryRow(ctx, `SELECT payload_hash, previous_hash, sequence, device_id, device_session_id, fencing_version, status, result_sale_id, result_shift_id FROM sync_operations WHERE operation_id = $1 FOR UPDATE`, op.OperationID).
 		Scan(&storedHash, &storedPreviousHash, &storedSequence, &storedDeviceID, &storedSessionID, &storedFencingVersion, &status, &resultSaleID, &resultShiftID)
 	if err == nil {
 		if storedHash != op.PayloadHash || storedPreviousHash != op.PreviousHash || storedSequence != op.Sequence || storedDeviceID != op.DeviceID || storedSessionID != op.DeviceSessionID || storedFencingVersion != op.FencingVersion {
 			return SyncReservation{}, fmt.Errorf("%w: operation id was reused with different content", ErrSyncConflict)
+		}
+		if status == "recovery_evidence" {
+			var linkedSaleID uuid.UUID
+			linkErr := tx.QueryRow(ctx, `SELECT sale_id FROM recovery_reconstructions WHERE source_operation_id=$1`, op.OperationID).Scan(&linkedSaleID)
+			if linkErr == nil {
+				ack := syncACK(op, "acknowledged", linkedSaleID, uuid.Nil, true)
+				ackJSON, _ := json.Marshal(ack)
+				now := r.now().UTC()
+				if _, err := tx.Exec(ctx, `UPDATE sync_operations SET status='acknowledged',result_sale_id=$2,ack=$3,acknowledged_at=$4 WHERE operation_id=$1`, op.OperationID, linkedSaleID, ackJSON, now); err != nil {
+					return SyncReservation{}, fmt.Errorf("link recovery evidence to reconstructed sale: %w", err)
+				}
+				if err := insertAudit(ctx, tx, actorID, "pos.recovery_evidence_linked", "sync_operation", op.OperationID, requestID, map[string]any{"sale_id": linkedSaleID}); err != nil {
+					return SyncReservation{}, err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return SyncReservation{}, mapWriteError("commit linked recovery evidence", err)
+				}
+				return SyncReservation{ACK: &ack}, nil
+			}
+			if !errors.Is(linkErr, pgx.ErrNoRows) {
+				return SyncReservation{}, fmt.Errorf("find reconstruction for recovery evidence: %w", linkErr)
+			}
 		}
 		if status == "acknowledged" || status == "recovery_evidence" {
 			return SyncReservation{ACK: &SyncACK{OperationID: op.OperationID, Sequence: op.Sequence, PayloadHash: op.PayloadHash, Status: status, SaleID: resultSaleID, ShiftID: resultShiftID, Replayed: true}}, nil

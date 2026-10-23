@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { beforeAll, describe, expect, it } from 'vitest'
 import type { PreparedContext } from './offline'
-import { configureOfflineUnlock, enqueueOfflineOperation, getOfflineUnlockUser, initializeOfflineStorage, pendingOperations, savePreparedContext, stableStringify, verifyOfflineUnlock } from './offline'
+import { closePreparedShiftOffline, configureOfflineUnlock, getOfflineUnlockUser, initializeOfflineStorage, loadPreparedContext, openPreparedShiftOffline, pendingOperations, savePreparedContext, stableStringify, verifyOfflineUnlock } from './offline'
 
 const context: PreparedContext = {
   device: { id: '10000000-0000-4000-8000-000000000001', device_id: '10000000-0000-4000-8000-000000000002', device_name: 'Test', user_id: '10000000-0000-4000-8000-000000000003', status: 'active', fencing_version: 4, acquired_at: '2026-10-12T12:00:00Z' },
@@ -28,12 +28,28 @@ describe('stableStringify', () => {
 })
 
 describe('offline journal', () => {
-  it('chains an offline close and the following open in strict order', async () => {
-    const close = await enqueueOfflineOperation('shift_close', { cash_shift_id: context.shift.id, expected_version: 7, counted_cash_cents: 12900, closing_note: '' }, context, '20000000-0000-4000-8000-000000000001')
-    const open = await enqueueOfflineOperation('shift_open', { id: '20000000-0000-4000-8000-000000000002', previous_cash_shift_id: context.shift.id, device_session_id: context.device.id, fencing_version: 4, opening_cash_cents: 12900, opening_note: '' }, context, '20000000-0000-4000-8000-000000000003')
-    expect(open.sequence).toBe(close.sequence + 1)
-    expect(open.previous_hash).toBe(close.payload_hash)
+  it('persists each shift transition and its prepared state atomically in strict order', async () => {
+    const close = await closePreparedShiftOffline(context, 12900, 'Relevo')
+    expect((await loadPreparedContext())?.shift).toMatchObject({
+      id: context.shift.id,
+      status: 'provisional_closed',
+      version: context.shift.version + 1,
+      counted_cash_cents: 12900,
+      difference_cents: -100,
+    })
+
+    const open = await openPreparedShiftOffline(close.context, 12900, 'Recibido del turno anterior')
+    expect(open.operation.sequence).toBe(close.operation.sequence + 1)
+    expect(open.operation.previous_hash).toBe(close.operation.payload_hash)
+    expect((await loadPreparedContext())?.shift).toEqual(open.context.shift)
     expect((await pendingOperations()).map((operation) => operation.operation_type)).toEqual(['shift_close', 'shift_open'])
+
+    await expect(openPreparedShiftOffline(close.context, 12900, '')).rejects.toThrow('El turno local cambió')
+    expect((await pendingOperations()).map((operation) => operation.operation_id)).toEqual([
+      close.operation.operation_id,
+      open.operation.operation_id,
+    ])
+    expect((await loadPreparedContext())?.shift).toEqual(open.context.shift)
   })
 })
 

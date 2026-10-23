@@ -239,9 +239,19 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 		return Sale{}, fmt.Errorf("begin sale: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	sale, err := r.createSale(ctx, tx, input, actorID, requestID, payloadHash)
+	if err != nil {
+		return Sale{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Sale{}, mapWriteError("commit sale", err)
+	}
+	return sale, nil
+}
 
+func (r *PostgresRepository) createSale(ctx context.Context, tx pgx.Tx, input CreateSaleInput, actorID uuid.UUID, requestID, payloadHash string) (Sale, error) {
 	var storedHash string
-	err = tx.QueryRow(ctx, `SELECT payload_hash FROM sales WHERE id = $1`, input.OperationID).Scan(&storedHash)
+	err := tx.QueryRow(ctx, `SELECT payload_hash FROM sales WHERE id = $1`, input.OperationID).Scan(&storedHash)
 	if err == nil {
 		if storedHash != payloadHash {
 			return Sale{}, fmt.Errorf("%w: operation id was already used with a different payload", ErrConflict)
@@ -435,9 +445,6 @@ func (r *PostgresRepository) CreateSale(ctx context.Context, input CreateSaleInp
 		"payment_state": sale.PaymentState, "inventory_incidents": len(sale.InventoryIncidents),
 	}); err != nil {
 		return Sale{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Sale{}, mapWriteError("commit sale", err)
 	}
 	return sale, nil
 }

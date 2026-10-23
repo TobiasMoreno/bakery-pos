@@ -7,9 +7,11 @@ Go, React, TypeScript y PostgreSQL.
 
 Fase 4 en implementación: además del POS online se incorporaron PWA instalable,
 intents de cobro y diario durable en IndexedDB, autorización offline de 24 horas,
-cola ordenada con hashes y ACK idempotente, y apertura de recuperación forzada.
-El cierre/apertura de turnos offline y la conciliación final asistida siguen
-pendientes antes de declarar cerrada la fase.
+cola ordenada con hashes y ACK idempotente, cierre provisional y apertura del
+siguiente turno en el mismo diario, recuperación forzada y conciliación
+asistida con reconstrucción atómica. La validación del desbloqueo local y las
+pruebas en dispositivos reales siguen pendientes antes de declarar cerrada la
+fase.
 
 ## Requisitos
 

@@ -3,7 +3,8 @@ import type {
   CatalogSnapshot,
   DeviceSession,
   OfflineAuthorization,
-  OfflinePayload,
+  OfflineCloseShiftInput,
+  OfflineOpenShiftInput,
   OfflineOperation,
   SaleInput,
   SyncACK,
@@ -33,6 +34,14 @@ export interface PreparedContext {
 
 type JournalState = { key: 'journal'; sequence: number; last_hash: string }
 type StoredOperation = OfflineOperation & { local_status: 'pending' | 'sending' | 'acknowledged' | 'conflict' | 'failed'; ack?: SyncACK }
+type StoredShiftEvent = {
+  id: string
+  operation_id: string
+  operation_type: 'shift_close' | 'shift_open'
+  previous_shift_id: string
+  shift: CashShift
+  created_at: string
+}
 type OfflineUnlockRecord = { key: 'active'; user: User; salt: string; verifier: string; iterations: number; configured_at: string }
 
 export async function initializeOfflineStorage(): Promise<void> {
@@ -123,38 +132,60 @@ export async function consolidateIntent(id: string, payload: SaleInput, context:
   return operation
 }
 
-export async function enqueueOfflineOperation(
-  operationType: OfflineOperation['operation_type'],
-  payload: OfflinePayload,
+export async function closePreparedShiftOffline(
   context: PreparedContext,
-  operationID = crypto.randomUUID(),
-): Promise<StoredOperation> {
-  if (new Date(context.authorization.expires_at).getTime() < Date.now()) throw new Error('La autorización offline venció. Reconectate antes de continuar.')
-  const payloadHash = await sha256(stableStringify(payload))
-  const db = await openDatabase()
-  const tx = db.transaction(['meta', 'operations'], 'readwrite')
-  const metaStore = tx.objectStore('meta')
-  const journal = await requestResult<JournalState | undefined>(metaStore.get('journal'))
-  if (!journal) throw new Error('El diario local no está preparado.')
-  const operation: StoredOperation = {
-    operation_id: operationID,
-    operation_type: operationType,
-    device_id: context.device.device_id,
+  countedCashCents: number,
+  closingNote: string,
+): Promise<{ context: PreparedContext; operation: OfflineOperation }> {
+  if (context.shift.status !== 'open') throw new Error('El turno local ya no está abierto.')
+  if (!Number.isSafeInteger(countedCashCents) || countedCashCents < 0) throw new Error('El efectivo contado no es válido.')
+  const now = new Date().toISOString()
+  const payload: OfflineCloseShiftInput = {
+    cash_shift_id: context.shift.id,
+    expected_version: context.shift.version,
+    counted_cash_cents: countedCashCents,
+    closing_note: closingNote.trim(),
+  }
+  const nextShift: CashShift = {
+    ...context.shift,
+    status: 'provisional_closed',
+    version: context.shift.version + 1,
+    counted_cash_cents: countedCashCents,
+    difference_cents: countedCashCents - context.shift.expected_cash_cents,
+    closing_note: payload.closing_note,
+    closed_at: now,
+  }
+  return persistShiftTransition('shift_close', payload, context, nextShift, now)
+}
+
+export async function openPreparedShiftOffline(
+  context: PreparedContext,
+  openingCashCents: number,
+  openingNote: string,
+): Promise<{ context: PreparedContext; operation: OfflineOperation }> {
+  if (context.shift.status !== 'provisional_closed') throw new Error('Primero cerrá provisionalmente el turno anterior.')
+  if (!Number.isSafeInteger(openingCashCents) || openingCashCents < 0) throw new Error('El efectivo inicial no es válido.')
+  const now = new Date().toISOString()
+  const nextShift: CashShift = {
+    id: crypto.randomUUID(),
+    status: 'open',
+    version: 1,
+    device_session_id: context.device.id,
+    opened_by: context.authorization.user_id,
+    opening_cash_cents: openingCashCents,
+    opening_note: openingNote.trim(),
+    opened_at: now,
+    expected_cash_cents: openingCashCents,
+  }
+  const payload: OfflineOpenShiftInput = {
+    id: nextShift.id,
+    previous_cash_shift_id: context.shift.id,
     device_session_id: context.device.id,
     fencing_version: context.device.fencing_version,
-    sequence: journal.sequence + 1,
-    created_at_local: new Date().toISOString(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Argentina/Buenos_Aires',
-    previous_hash: journal.last_hash,
-    payload_hash: payloadHash,
-    authorization: context.authorization.token,
-    payload,
-    local_status: 'pending',
+    opening_cash_cents: openingCashCents,
+    opening_note: nextShift.opening_note ?? '',
   }
-  tx.objectStore('operations').add(operation)
-  metaStore.put({ key: 'journal', sequence: operation.sequence, last_hash: operation.payload_hash } satisfies JournalState)
-  await transactionDone(tx)
-  return operation
+  return persistShiftTransition('shift_open', payload, context, nextShift, now)
 }
 
 export async function configureOfflineUnlock(user: User, secret: string): Promise<void> {
@@ -265,6 +296,68 @@ async function updateOperations(ids: string[], update: (operation: StoredOperati
     if (operation) store.put(update(operation))
   }
   await transactionDone(tx)
+}
+
+async function persistShiftTransition(
+  operationType: 'shift_close' | 'shift_open',
+  payload: OfflineCloseShiftInput | OfflineOpenShiftInput,
+  context: PreparedContext,
+  nextShift: CashShift,
+  createdAt: string,
+): Promise<{ context: PreparedContext; operation: OfflineOperation }> {
+  if (new Date(context.authorization.expires_at).getTime() < Date.now()) throw new Error('La autorización offline venció. Reconectate antes de continuar.')
+  if (context.device.id !== context.authorization.device_session_id || context.device.fencing_version !== context.authorization.fencing_version) {
+    throw new Error('La autorización local no corresponde a este puesto.')
+  }
+  const operationID = crypto.randomUUID()
+  const payloadHash = await sha256(stableStringify(payload))
+  const db = await openDatabase()
+  const tx = db.transaction(['meta', 'operations', 'shift_events'], 'readwrite')
+  const metaStore = tx.objectStore('meta')
+  const journalRequest = metaStore.get('journal')
+  const preparedRequest = metaStore.get('prepared')
+  const [journal, prepared] = await Promise.all([
+    requestResult<JournalState | undefined>(journalRequest),
+    requestResult<{ key: string; value: { shift: CashShift; catalog_version: number } } | undefined>(preparedRequest),
+  ])
+  if (!journal || !prepared) {
+    tx.abort()
+    throw new Error('El diario local no está preparado.')
+  }
+  const storedShift = prepared.value.shift
+  if (storedShift.id !== context.shift.id || storedShift.status !== context.shift.status || storedShift.version !== context.shift.version) {
+    tx.abort()
+    throw new Error('El turno local cambió. Recargá el estado antes de continuar.')
+  }
+  const operation: StoredOperation = {
+    operation_id: operationID,
+    operation_type: operationType,
+    device_id: context.device.device_id,
+    device_session_id: context.device.id,
+    fencing_version: context.device.fencing_version,
+    sequence: journal.sequence + 1,
+    created_at_local: createdAt,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Argentina/Buenos_Aires',
+    previous_hash: journal.last_hash,
+    payload_hash: payloadHash,
+    authorization: context.authorization.token,
+    payload,
+    local_status: 'pending',
+  }
+  const nextContext = { ...context, shift: nextShift }
+  tx.objectStore('operations').add(operation)
+  tx.objectStore('shift_events').add({
+    id: operationID,
+    operation_id: operationID,
+    operation_type: operationType,
+    previous_shift_id: context.shift.id,
+    shift: nextShift,
+    created_at: createdAt,
+  } satisfies StoredShiftEvent)
+  metaStore.put({ key: 'journal', sequence: operation.sequence, last_hash: operation.payload_hash } satisfies JournalState)
+  metaStore.put({ key: 'prepared', value: { shift: nextShift, catalog_version: context.snapshot.version } })
+  await transactionDone(tx)
+  return { context: nextContext, operation: stripLocalFields(operation) }
 }
 
 async function allFromStore<T>(name: string): Promise<T[]> {

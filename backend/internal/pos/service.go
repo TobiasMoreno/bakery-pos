@@ -37,9 +37,10 @@ type Repository interface {
 	CloseOfflineShift(context.Context, CloseShiftInput, uuid.UUID, string) (CashShift, error)
 	GetActiveRecovery(context.Context) (*RecoveryDetails, error)
 	AddRecoveryDifference(context.Context, uuid.UUID, RecoveryDifferenceInput, uuid.UUID, string) (RecoveryDetails, error)
+	ResolveRecoveryDifference(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (RecoveryDetails, error)
 	UpdateRecoveryControls(context.Context, uuid.UUID, RecoveryControlsInput, uuid.UUID, string) (RecoveryDetails, error)
 	CloseRecovery(context.Context, uuid.UUID, uuid.UUID, string) (RecoveryDetails, error)
-	RecordReconstruction(context.Context, uuid.UUID, RecoveryReconstructionInput, Sale, uuid.UUID, string) error
+	ReconstructRecoverySale(context.Context, uuid.UUID, RecoveryReconstructionInput, uuid.UUID, string, string) (Sale, error)
 }
 
 type Service struct {
@@ -113,33 +114,40 @@ func (s *Service) CloseShift(ctx context.Context, input CloseShiftInput, actorID
 }
 
 func (s *Service) CreateSale(ctx context.Context, input CreateSaleInput, actorID uuid.UUID, requestID string) (Sale, error) {
-	if input.OperationID == uuid.Nil || input.DeviceSessionID == uuid.Nil || input.CashShiftID == uuid.Nil ||
-		input.FencingVersion <= 0 || input.ShiftVersion <= 0 || input.CatalogVersion <= 0 || actorID == uuid.Nil || requestID == "" {
-		return Sale{}, fmt.Errorf("%w: sale identifiers and versions are required", ErrInvalid)
-	}
-	if len(input.Items) == 0 || len(input.Items) > 100 || len(input.Payments) == 0 || len(input.Payments) > 10 {
-		return Sale{}, fmt.Errorf("%w: a sale requires items and payments", ErrInvalid)
-	}
-	seenProducts := make(map[uuid.UUID]struct{}, len(input.Items))
-	for _, item := range input.Items {
-		if item.ProductID == uuid.Nil || item.Quantity.Milliunits() <= 0 {
-			return Sale{}, fmt.Errorf("%w: item product and positive quantity are required", ErrInvalid)
-		}
-		if _, exists := seenProducts[item.ProductID]; exists {
-			return Sale{}, fmt.Errorf("%w: duplicate products must be consolidated into one line", ErrInvalid)
-		}
-		seenProducts[item.ProductID] = struct{}{}
-	}
-	for _, payment := range input.Payments {
-		if err := validatePayment(payment); err != nil {
-			return Sale{}, err
-		}
+	if err := validateCreateSaleInput(input, actorID, requestID); err != nil {
+		return Sale{}, err
 	}
 	payloadHash, err := salePayloadHash(input, actorID)
 	if err != nil {
 		return Sale{}, fmt.Errorf("encode sale idempotency payload: %w", err)
 	}
 	return s.repository.CreateSale(ctx, input, actorID, requestID, payloadHash)
+}
+
+func validateCreateSaleInput(input CreateSaleInput, actorID uuid.UUID, requestID string) error {
+	if input.OperationID == uuid.Nil || input.DeviceSessionID == uuid.Nil || input.CashShiftID == uuid.Nil ||
+		input.FencingVersion <= 0 || input.ShiftVersion <= 0 || input.CatalogVersion <= 0 || actorID == uuid.Nil || requestID == "" {
+		return fmt.Errorf("%w: sale identifiers and versions are required", ErrInvalid)
+	}
+	if len(input.Items) == 0 || len(input.Items) > 100 || len(input.Payments) == 0 || len(input.Payments) > 10 {
+		return fmt.Errorf("%w: a sale requires items and payments", ErrInvalid)
+	}
+	seenProducts := make(map[uuid.UUID]struct{}, len(input.Items))
+	for _, item := range input.Items {
+		if item.ProductID == uuid.Nil || item.Quantity.Milliunits() <= 0 {
+			return fmt.Errorf("%w: item product and positive quantity are required", ErrInvalid)
+		}
+		if _, exists := seenProducts[item.ProductID]; exists {
+			return fmt.Errorf("%w: duplicate products must be consolidated into one line", ErrInvalid)
+		}
+		seenProducts[item.ProductID] = struct{}{}
+	}
+	for _, payment := range input.Payments {
+		if err := validatePayment(payment); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) ListSales(ctx context.Context, filter SaleFilter) (SaleList, error) {
@@ -297,6 +305,13 @@ func (s *Service) AddRecoveryDifference(ctx context.Context, caseID uuid.UUID, i
 	return s.repository.AddRecoveryDifference(ctx, caseID, input, actorID, requestID)
 }
 
+func (s *Service) ResolveRecoveryDifference(ctx context.Context, caseID, differenceID, actorID uuid.UUID, requestID string) (RecoveryDetails, error) {
+	if caseID == uuid.Nil || differenceID == uuid.Nil || actorID == uuid.Nil || requestID == "" {
+		return RecoveryDetails{}, fmt.Errorf("%w: invalid recovery difference resolution", ErrInvalid)
+	}
+	return s.repository.ResolveRecoveryDifference(ctx, caseID, differenceID, actorID, requestID)
+}
+
 func (s *Service) UpdateRecoveryControls(ctx context.Context, caseID uuid.UUID, input RecoveryControlsInput, actorID uuid.UUID, requestID string) (RecoveryDetails, error) {
 	if caseID == uuid.Nil || actorID == uuid.Nil || requestID == "" || (input.JournalStatus != "imported" && input.JournalStatus != "unrecoverable") {
 		return RecoveryDetails{}, fmt.Errorf("%w: invalid recovery controls", ErrInvalid)
@@ -318,14 +333,14 @@ func (s *Service) ReconstructRecoverySale(ctx context.Context, caseID uuid.UUID,
 	}
 	input.Sale.OperationID = input.ReconciliationOperationID
 	input.Sale.recoveryCaseID = &caseID
-	sale, err := s.CreateSale(ctx, input.Sale, actorID, requestID)
+	if err := validateCreateSaleInput(input.Sale, actorID, requestID); err != nil {
+		return Sale{}, err
+	}
+	payloadHash, err := salePayloadHash(input.Sale, actorID)
 	if err != nil {
-		return Sale{}, err
+		return Sale{}, fmt.Errorf("encode recovery sale idempotency payload: %w", err)
 	}
-	if err := s.repository.RecordReconstruction(ctx, caseID, input, sale, actorID, requestID); err != nil {
-		return Sale{}, err
-	}
-	return sale, nil
+	return s.repository.ReconstructRecoverySale(ctx, caseID, input, actorID, requestID, payloadHash)
 }
 
 func (s *Service) validateOfflineOperation(op OfflineOperation) (OfflineAuthorization, error) {

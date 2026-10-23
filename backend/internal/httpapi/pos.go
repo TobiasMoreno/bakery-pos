@@ -249,6 +249,24 @@ func (s *Server) addRecoveryDifference(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, details)
 }
 
+func (s *Server) resolveRecoveryDifference(w http.ResponseWriter, r *http.Request) {
+	caseID, ok := parseNamedUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	differenceID, ok := parseNamedUUID(w, r, "difference_id")
+	if !ok {
+		return
+	}
+	user, _ := UserFromContext(r.Context())
+	details, err := s.pos.ResolveRecoveryDifference(r.Context(), caseID, differenceID, user.ID, RequestIDFromContext(r.Context()))
+	if err != nil {
+		s.posError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, details)
+}
+
 func (s *Server) updateRecoveryControls(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseNamedUUID(w, r, "id")
 	if !ok {

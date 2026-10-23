@@ -538,6 +538,26 @@ paths:
               schema: { $ref: "#/components/schemas/RecoveryDetails" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationError" }
+  /pos/recovery/{id}/differences/{difference_id}/resolve:
+    post:
+      summary: Marcar una diferencia de conciliación como resuelta
+      operationId: resolveRecoveryDifference
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/RecoveryCaseID" }
+        - name: difference_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Diferencia resuelta y conciliación actualizada.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryDetails" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /pos/recovery/{id}/controls:
     put:
       summary: Guardar controles de conciliación

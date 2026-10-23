@@ -15,6 +15,7 @@ import {
   openCashShift,
   recordCashMovement,
   reconstructRecoverySale,
+  resolveRecoveryDifference,
   syncOfflineOperations,
   updateRecoveryControls,
   type CashMovementType,
@@ -31,14 +32,15 @@ import { calculateLineSubtotal, centsToInput, formatARS, parseARSCents } from '.
 import {
   applySyncACKs,
   blockingCollectingIntent,
+  closePreparedShiftOffline,
   consolidateIntent,
   createCheckoutIntent,
-  enqueueOfflineOperation,
   initializeOfflineStorage,
   loadPreparedContext,
   markIntentCollecting,
   markSending,
   markSyncFailed,
+  openPreparedShiftOffline,
   pendingOperationCount,
   pendingOperations,
   savePreparedContext,
@@ -339,7 +341,7 @@ function POSDashboard({ user, onOpenCatalog, onLogout }: POSDashboardProps) {
           lastSale={lastSale}
         />
       )}
-      {!loading && view === 'cash' && <CashWorkspace device={device} shift={shift} prepared={prepared} onShift={setShift} onPrepared={(next) => { setPrepared(next); void savePreparedContext(next) }} onJournalChanged={async () => { setPendingCount(await pendingOperationCount()); if (navigator.onLine) await synchronize() }} />}
+      {!loading && view === 'cash' && <CashWorkspace device={device} shift={shift} prepared={prepared} onShift={setShift} onPrepared={setPrepared} onJournalChanged={async () => { setPendingCount(await pendingOperationCount()); if (navigator.onLine) await synchronize() }} />}
       {!loading && view === 'history' && <HistoryWorkspace sales={sales} />}
       {!loading && view === 'recovery' && user.role === 'owner' && <RecoveryWorkspace device={device} snapshot={snapshot} recovery={recovery} onRecovery={setRecovery} />}
 
@@ -430,7 +432,16 @@ function RecoveryWorkspace({ device, snapshot, recovery, onRecovery }: {
       .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
   }
 
+  function resolveDifference(differenceID: string) {
+    if (!recovery) return
+    setBusy(true); setError(null)
+    void resolveRecoveryDifference(recovery.id, differenceID)
+      .then((next) => { onRecovery(next); setMessage('Diferencia marcada como resuelta.') })
+      .catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false))
+  }
+
   const patchControl = (patch: Partial<RecoveryDetails>) => recovery && onRecovery({ ...recovery, ...patch })
+  const hasOpenDifferences = recovery?.differences.some((difference) => !difference.resolved_at) ?? false
 
   if (!recovery) return (
     <section className="recovery-workspace"><header className="pos-heading"><div><p className="eyebrow">Sólo dueño</p><h1>Recuperación extraordinaria</h1></div></header>
@@ -446,9 +457,9 @@ function RecoveryWorkspace({ device, snapshot, recovery, onRecovery }: {
       <div className="recovery-grid">
         <form className="cash-card" onSubmit={addDifference}><p className="eyebrow">Brechas explícitas</p><h2>Registrar diferencia</h2><label><span>Tipo</span><select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="sequence_gap">Brecha de secuencia</option><option value="unknown_sale_total">Venta sin detalle</option><option value="cash">Efectivo</option><option value="digital_payment">Pago digital</option><option value="inventory">Inventario</option></select></label><label><span>Importe, si aplica</span><input value={differenceAmount} onChange={(event) => setDifferenceAmount(event.target.value)} inputMode="decimal" /></label><label><span>Descripción y evidencia</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} minLength={3} maxLength={500} required /></label><button className="action-button" disabled={busy}>Agregar diferencia</button></form>
         {recovery.affected_shift_id && <form className="cash-card" onSubmit={reconstruct}><p className="eyebrow">Venta conocida</p><h2>Reconstruir sin duplicar</h2><label><span>Producto</span><select value={productID} onChange={(event) => setProductID(event.target.value)} required><option value="">Seleccionar…</option>{snapshot?.products.filter((product) => product.sellable).map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label><label><span>Cantidad exacta</span><input value={quantity} onChange={(event) => setQuantity(event.target.value)} inputMode="decimal" required /></label><label><span>Importe cobrado</span><input value={saleAmount} onChange={(event) => setSaleAmount(event.target.value)} inputMode="decimal" required /></label><label><span>Medio</span><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}><option value="cash">Efectivo</option><option value="transfer">Transferencia</option><option value="qr">QR</option><option value="card">Tarjeta</option><option value="other">Otro</option></select></label><label><span>ID original, si existe</span><input value={sourceOperationID} onChange={(event) => setSourceOperationID(event.target.value)} placeholder="UUID del diario perdido" /></label><label><span>Certeza</span><select value={certainty} onChange={(event) => setCertainty(event.target.value as typeof certainty)}><option value="exact">Exacta</option><option value="probable">Probable</option></select></label><label><span>Evidencia</span><textarea value={evidence} onChange={(event) => setEvidence(event.target.value)} minLength={3} maxLength={500} required /></label><button className="action-button" disabled={busy}>Reconstruir venta</button></form>}
-        <form className="cash-card recovery-controls" onSubmit={saveControls}><p className="eyebrow">Cierre controlado</p><h2>Lista de conciliación</h2><label><span>Estado del diario</span><select value={recovery.journal_status} onChange={(event) => patchControl({ journal_status: event.target.value as RecoveryDetails['journal_status'] })}><option value="pending">Pendiente</option><option value="imported">Importado</option><option value="unrecoverable">Irrecuperable declarado</option></select></label><label className="verify-check"><input type="checkbox" checked={recovery.gaps_documented} onChange={(event) => patchControl({ gaps_documented: event.target.checked })} /><span>Brechas documentadas</span></label><label className="verify-check"><input type="checkbox" checked={recovery.digital_payments_reviewed} onChange={(event) => patchControl({ digital_payments_reviewed: event.target.checked })} /><span>Pagos digitales revisados</span></label><label className="verify-check"><input type="checkbox" checked={recovery.inventory_counted} onChange={(event) => patchControl({ inventory_counted: event.target.checked })} /><span>Inventario contado</span></label><label className="verify-check"><input type="checkbox" checked={recovery.owner_approved} onChange={(event) => patchControl({ owner_approved: event.target.checked })} /><span>Aprobación final del dueño</span></label><button className="quiet-button" disabled={busy || recovery.journal_status === 'pending'}>Guardar controles</button><button type="button" className="danger-button" disabled={busy || recovery.journal_status === 'pending' || !recovery.gaps_documented || !recovery.digital_payments_reviewed || !recovery.inventory_counted || !recovery.owner_approved} onClick={() => { setBusy(true); void closeRecovery(recovery.id).then((next) => { onRecovery(next); setMessage('Conciliación cerrada sin borrar evidencia.') }).catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false)) }}>Cerrar conciliación</button></form>
+        <form className="cash-card recovery-controls" onSubmit={saveControls}><p className="eyebrow">Cierre controlado</p><h2>Lista de conciliación</h2><label><span>Estado del diario</span><select value={recovery.journal_status} onChange={(event) => patchControl({ journal_status: event.target.value as RecoveryDetails['journal_status'] })}><option value="pending">Pendiente</option><option value="imported">Importado</option><option value="unrecoverable">Irrecuperable declarado</option></select></label><label className="verify-check"><input type="checkbox" checked={recovery.gaps_documented} onChange={(event) => patchControl({ gaps_documented: event.target.checked })} /><span>Brechas documentadas</span></label><label className="verify-check"><input type="checkbox" checked={recovery.digital_payments_reviewed} onChange={(event) => patchControl({ digital_payments_reviewed: event.target.checked })} /><span>Pagos digitales revisados</span></label><label className="verify-check"><input type="checkbox" checked={recovery.inventory_counted} onChange={(event) => patchControl({ inventory_counted: event.target.checked })} /><span>Inventario contado</span></label><label className="verify-check"><input type="checkbox" checked={recovery.owner_approved} onChange={(event) => patchControl({ owner_approved: event.target.checked })} /><span>Aprobación final del dueño</span></label>{hasOpenDifferences && <p className="notice notice-warning">Resolvé todas las diferencias abiertas antes del cierre final.</p>}<button className="quiet-button" disabled={busy || recovery.journal_status === 'pending'}>Guardar controles</button><button type="button" className="danger-button" disabled={busy || hasOpenDifferences || recovery.journal_status === 'pending' || !recovery.gaps_documented || !recovery.digital_payments_reviewed || !recovery.inventory_counted || !recovery.owner_approved} onClick={() => { setBusy(true); void closeRecovery(recovery.id).then((next) => { onRecovery(next); setMessage('Conciliación cerrada sin borrar evidencia.') }).catch((caught: unknown) => setError(apiMessage(caught))).finally(() => setBusy(false)) }}>Cerrar conciliación</button></form>
       </div>
-      <div className="recovery-differences"><h2>Diferencias registradas</h2>{recovery.differences.length ? recovery.differences.map((item) => <article key={item.id}><strong>{item.kind.replaceAll('_', ' ')}</strong><span>{item.amount_cents === undefined ? 'Sin importe' : formatARS(item.amount_cents)}</span><p>{item.description}</p></article>) : <p>Sin diferencias documentadas todavía.</p>}</div>
+      <div className="recovery-differences"><h2>Diferencias registradas</h2>{recovery.differences.length ? recovery.differences.map((item) => <article key={item.id}><strong>{item.kind.replaceAll('_', ' ')}</strong><span>{item.amount_cents === undefined ? 'Sin importe' : formatARS(item.amount_cents)}</span><p>{item.description}</p>{item.resolved_at ? <small>Resuelta el {new Date(item.resolved_at).toLocaleString('es-AR')}</small> : <button type="button" className="text-button" disabled={busy} onClick={() => resolveDifference(item.id)}>Marcar resuelta</button>}</article>) : <p>Sin diferencias documentadas todavía.</p>}</div>
     </section>
   )
 }
@@ -570,16 +581,9 @@ function CashWorkspace({ device, shift, prepared, onShift, onPrepared, onJournal
     const onlineOpen = () => openCashShift({ device_session_id: device.id, fencing_version: device.fencing_version, opening_cash_cents: cents, opening_note: '' })
     const queuedOpen = async () => {
       if (!prepared) return onlineOpen()
-      const next: CashShift = {
-        id: newID(), status: 'open', version: 1, device_session_id: device.id, opened_by: prepared.authorization.user_id,
-        opening_cash_cents: cents, opening_note: '', opened_at: new Date().toISOString(), expected_cash_cents: cents,
-      }
-      await enqueueOfflineOperation('shift_open', {
-        id: next.id, previous_cash_shift_id: prepared.shift.id, device_session_id: device.id,
-        fencing_version: device.fencing_version, opening_cash_cents: cents, opening_note: '',
-      }, prepared)
-      onPrepared({ ...prepared, shift: next })
-      return next
+      const transition = await openPreparedShiftOffline(prepared, cents, '')
+      onPrepared(transition.context)
+      return transition.context.shift
     }
     void queuedOpen()
       .then(async (next) => { onShift(next); setOpening(''); setMessage(`Turno ${prepared ? 'guardado localmente' : 'abierto'}. Ya podés registrar ventas.`); if (prepared) await onJournalChanged() })
@@ -604,13 +608,9 @@ function CashWorkspace({ device, shift, prepared, onShift, onPrepared, onJournal
     setBusy(true); setError(null)
     const queuedClose = async () => {
       if (!prepared) return closeCashShift(shift.id, { expected_version: shift.version, counted_cash_cents: cents, closing_note: '' })
-      await enqueueOfflineOperation('shift_close', { cash_shift_id: shift.id, expected_version: shift.version, counted_cash_cents: cents, closing_note: '' }, prepared)
-      const closed: CashShift = {
-        ...shift, status: 'provisional_closed', counted_cash_cents: cents, expected_cash_cents: shift.expected_cash_cents,
-        difference_cents: cents - shift.expected_cash_cents, closing_note: '', closed_at: new Date().toISOString(),
-      }
-      onPrepared({ ...prepared, shift: closed })
-      return closed
+      const transition = await closePreparedShiftOffline(prepared, cents, '')
+      onPrepared(transition.context)
+      return transition.context.shift
     }
     void queuedClose()
       .then(async (closed) => { onShift(null); setCounted(''); setMessage(`Turno ${prepared ? 'cerrado provisionalmente' : 'cerrado'}. Diferencia: ${formatSignedARS(closed.difference_cents ?? 0)}.`); if (prepared) await onJournalChanged() })

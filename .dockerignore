@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!backend/
+!backend/**
+!frontend/
+!frontend/**
+backend/.env
+frontend/.env
+frontend/node_modules
+frontend/dist

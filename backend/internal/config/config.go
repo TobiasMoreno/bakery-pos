@@ -16,6 +16,7 @@ type Config struct {
 	HTTPAddr          string
 	DatabaseURL       string
 	AllowedOrigin     string
+	FrontendDir       string
 	CookieSecure      bool
 	SessionTTL        time.Duration
 	OfflineSigningKey string
@@ -31,6 +32,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		HTTPAddr:          valueOrDefault(getenv("APP_HTTP_ADDR"), ":8080"),
 		DatabaseURL:       strings.TrimSpace(getenv("DATABASE_URL")),
 		AllowedOrigin:     valueOrDefault(getenv("APP_ALLOWED_ORIGIN"), "http://localhost:5173"),
+		FrontendDir:       strings.TrimSpace(getenv("APP_FRONTEND_DIR")),
 		SessionTTL:        defaultSessionTTL,
 		OfflineSigningKey: strings.TrimSpace(getenv("APP_OFFLINE_SIGNING_KEY")),
 	}

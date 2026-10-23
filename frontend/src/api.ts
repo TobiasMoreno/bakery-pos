@@ -551,6 +551,10 @@ export async function addRecoveryDifference(caseID: string, input: {
   return request<RecoveryDetails>(`/api/v1/pos/recovery/${caseID}/differences`, { method: 'POST', body: JSON.stringify(input) })
 }
 
+export async function resolveRecoveryDifference(caseID: string, differenceID: string): Promise<RecoveryDetails> {
+  return request<RecoveryDetails>(`/api/v1/pos/recovery/${caseID}/differences/${differenceID}/resolve`, { method: 'POST' })
+}
+
 export async function updateRecoveryControls(caseID: string, input: {
   journal_status: RecoveryDetails['journal_status']
   gaps_documented: boolean

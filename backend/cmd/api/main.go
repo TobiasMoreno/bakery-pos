@@ -54,6 +54,13 @@ func main() {
 		Inventory:     inventoryService,
 		POS:           posService,
 	}).Routes()
+	if cfg.FrontendDir != "" {
+		handler, err = httpapi.WithFrontend(handler, cfg.FrontendDir)
+		if err != nil {
+			logger.Error("frontend unavailable", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

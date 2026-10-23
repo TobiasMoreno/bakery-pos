@@ -1,8 +1,8 @@
 # Plan de implementación del MVP
 
-- Versión: 2.1
-- Fecha: 2026-10-12
-- Estado: Fase 4 en implementación; núcleo de venta offline y sync disponible
+- Versión: 2.2
+- Fecha: 2026-10-15
+- Estado: Fase 4 en implementación; venta offline, sync, relevo y conciliación disponibles
 
 ## Principios de ejecución
 
@@ -140,8 +140,10 @@ encuentra en `FASE_3_POS_CAJA_ONLINE.md`.
 8. Cierre y apertura offline del mismo dispositivo se consolidan en orden.
 9. Las pruebas se ejecutan en los navegadores/dispositivos reales elegidos.
 
-Estado: en implementación desde el 2026-10-12. El avance y los controles aún
-pendientes están documentados en `FASE_4_OFFLINE_DISPOSITIVOS_RECUPERACION.md`.
+Estado: en implementación desde el 2026-10-12. El cierre provisional, la
+apertura local encadenada y la reconstrucción atómica quedaron implementados el
+2026-10-15. El avance y los controles aún pendientes están documentados en
+`FASE_4_OFFLINE_DISPOSITIVOS_RECUPERACION.md`.
 
 ## Fase 5 — Inventario, compras, lotes y correcciones
 

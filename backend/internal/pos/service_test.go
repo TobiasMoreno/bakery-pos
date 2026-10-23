@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"bakery-pos/backend/internal/inventory"
+
+	"github.com/google/uuid"
 )
 
 func TestCalculateSubtotalWeightUsesHalfUpRounding(t *testing.T) {
@@ -63,5 +65,17 @@ func TestValidatePaymentRejectsPendingPaymentForCompletedSale(t *testing.T) {
 	err := validatePayment(PaymentInput{Method: PaymentTransfer, AmountCents: 100, Status: PaymentPending})
 	if !errors.Is(err, ErrPaymentIncomplete) {
 		t.Fatalf("error = %v, want ErrPaymentIncomplete", err)
+	}
+}
+
+func TestValidateCreateSaleInputRejectsInvalidCashBeforePersistence(t *testing.T) {
+	input := CreateSaleInput{
+		OperationID: uuid.New(), DeviceSessionID: uuid.New(), FencingVersion: 1,
+		CashShiftID: uuid.New(), ShiftVersion: 1, CatalogVersion: 1,
+		Items:    []SaleItemInput{{ProductID: uuid.New(), Quantity: mustQuantity(t, "1")}},
+		Payments: []PaymentInput{{Method: PaymentCash, AmountCents: 100, Status: PaymentConfirmed}},
+	}
+	if err := validateCreateSaleInput(input, uuid.New(), "request-test"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("validateCreateSaleInput() error = %v, want ErrInvalid", err)
 	}
 }

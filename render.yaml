@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: bakery-pos
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /readyz
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: demo
+      - key: APP_HTTP_ADDR
+        value: :10000
+      - key: APP_ALLOWED_ORIGIN
+        value: https://bakery-pos.onrender.com
+      - key: APP_COOKIE_SECURE
+        value: true
+      - key: APP_SESSION_TTL
+        value: 12h
+      - key: APP_FRONTEND_DIR
+        value: /app/frontend
+      - key: APP_OFFLINE_SIGNING_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DEMO_OWNER_NAME
+        value: Dueño Demo
+      - key: DEMO_OWNER_USERNAME
+        value: owner
+      - key: DEMO_OWNER_PASSWORD
+        sync: false
+      - key: DEMO_EMPLOYEE_NAME
+        value: Empleado Demo
+      - key: DEMO_EMPLOYEE_USERNAME
+        value: employee
+      - key: DEMO_EMPLOYEE_PASSWORD
+        sync: false
