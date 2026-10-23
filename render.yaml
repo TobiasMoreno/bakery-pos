@@ -14,7 +14,7 @@ services:
       - key: APP_HTTP_ADDR
         value: :10000
       - key: APP_ALLOWED_ORIGIN
-        value: https://bakery-pos.onrender.com
+        value: https://bakery-pos-yrwu.onrender.com
       - key: APP_COOKIE_SECURE
         value: true
       - key: APP_SESSION_TTL
