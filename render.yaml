@@ -3,7 +3,7 @@ services:
     name: bakery-pos
     runtime: docker
     plan: free
-    region: oregon
+    region: ohio
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /readyz
